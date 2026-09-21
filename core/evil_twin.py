@@ -210,12 +210,15 @@ log-dhcp
 
         try:
             self._kill_conflicts()
-            if target_bssid:
-                self._spoof_bssid(target_bssid)
             self._write_hostapd_conf(ssid, channel, security,
                                      wpa_passphrase, target_bssid)
             self._write_dnsmasq_conf()
+            # _setup_interface hace down/up e iw set type __ap, lo que
+            # puede resetear la MAC en algunos drivers. El spoof de BSSID
+            # debe ir DESPUÉS para que la MAC quede fijada antes de hostapd.
             self._setup_interface(channel)
+            if target_bssid:
+                self._spoof_bssid(target_bssid)
             self._enable_forwarding(out_interface)
 
             # Lanzar hostapd
