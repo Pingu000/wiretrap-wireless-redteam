@@ -545,6 +545,11 @@ class WireTrap(QMainWindow):
         self.evil_twin.on_stopped = (
             lambda: self.bridge.attack_stopped.emit()
         )
+        self.evil_twin.on_error = (
+            lambda msg: self.bridge.log_message.emit(
+                f"[!] Evil Twin ERROR: {msg}"
+            )
+        )
         self.evil_twin.start(
             ssid=self.selected_ap.ssid,
             channel=self.selected_ap.channel or 6,

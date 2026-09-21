@@ -38,15 +38,36 @@ class EvilTwin:
         self.on_stopped     = None
         self.on_error       = None
 
+    @staticmethod
+    def _hw_mode_for_channel(channel):
+        """
+        hw_mode=g (802.11g) solo vale para 2.4GHz (canales 1-14).
+        Los canales 5GHz (36, 40, 44, 48, 52... 165) necesitan
+        hw_mode=a; si no, hostapd rechaza el canal y muere al
+        arrancar sin que se note (el proceso simplemente termina).
+        """
+        try:
+            ch = int(channel)
+        except (TypeError, ValueError):
+            return "g"
+        return "a" if ch >= 36 else "g"
+
     def _write_hostapd_conf(self, ssid, channel, security):
         """Genera el archivo de configuración de hostapd"""
+        hw_mode = self._hw_mode_for_channel(channel)
+        # ieee80211n habilita 802.11n; en 5GHz añadimos ieee80211ac
+        # para que el AP falso se comporte de forma más creíble.
+        extra = "ieee80211n=1\n"
+        if hw_mode == "a":
+            extra += "ieee80211ac=1\ncountry_code=ES\n"
+
         if security == "WPA2":
             conf = f"""interface={self.interface}
 driver=nl80211
 ssid={ssid}
-hw_mode=g
+hw_mode={hw_mode}
 channel={channel}
-macaddr_acl=0
+{extra}macaddr_acl=0
 auth_algs=1
 wpa=2
 wpa_passphrase=wiretrap123
@@ -58,9 +79,9 @@ rsn_pairwise=CCMP
             conf = f"""interface={self.interface}
 driver=nl80211
 ssid={ssid}
-hw_mode=g
+hw_mode={hw_mode}
 channel={channel}
-macaddr_acl=0
+{extra}macaddr_acl=0
 auth_algs=1
 """
         with open(self.hostapd_conf, "w") as f:
@@ -176,6 +197,22 @@ log-dhcp
             )
 
             time.sleep(1)
+
+            # hostapd puede morir al instante si rechaza la config
+            # (p.ej. canal/hw_mode incompatibles) sin que Popen lo
+            # refleje hasta que consultamos poll(). Si ya terminó,
+            # no seguimos: no tiene sentido levantar dnsmasq sobre
+            # un AP que nunca llegó a emitir un beacon.
+            if self._hostapd_proc.poll() is not None:
+                stderr = self._hostapd_proc.stderr.read().decode(
+                    "utf-8", errors="ignore"
+                )
+                self._hostapd_proc = None
+                if self.on_error:
+                    self.on_error(
+                        f"hostapd no pudo arrancar: {stderr.strip()}"
+                    )
+                return
 
             # Lanzar dnsmasq
             self._dnsmasq_proc = subprocess.Popen(
