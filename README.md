@@ -3,11 +3,7 @@
 Framework modular de auditoría ofensiva WiFi con GUI, desarrollado como proyecto individual
 para la asignatura **"Proyectos de Ciberseguridad - Ciberejercicios"** en U-TAD Madrid.
 
-> ⚠️ **Uso exclusivamente académico y autorizado.** Este proyecto cuenta con autorización
-> firmada por la universidad, la facultad, el profesor tutor (Eduardo Arriols Núñez) y todos
-> los participantes de la demo, realizada en un entorno de laboratorio completamente
-> controlado. No usar contra redes o dispositivos sin autorización explícita: el uso de estas
-> técnicas sobre redes ajenas sin consentimiento es ilegal.
+> ⚠️ No me hago responsable del uso que se le dé a esta herramienta.
 
 ## Stack técnico
 

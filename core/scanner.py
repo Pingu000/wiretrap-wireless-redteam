@@ -16,12 +16,15 @@ from utils.oui_lookup import get_vendor
 
 
 class AccessPoint:
-    def __init__(self, ssid, bssid, channel, security, signal):
+    def __init__(self, ssid, bssid, channel, security, signal,
+                 pmf_capable=False, pmf_required=False):
         self.ssid = ssid
         self.bssid = bssid
         self.channel = channel
         self.security = security
         self.signal = signal
+        self.pmf_capable = pmf_capable
+        self.pmf_required = pmf_required
         self.clients = set()
 
     def __repr__(self):
@@ -91,29 +94,77 @@ class Scanner:
             return 0
 
     def _get_security(self, packet):
+        """
+        Devuelve (security, pmf_capable, pmf_required).
+
+        Parseo del RSN IE (ID 48) respetando el layout real de bytes:
+            version(2) + group_cipher(4) + pairwise_count(2) +
+            pairwise_suites(4*n) + akm_count(2) + akm_suites(4*n) +
+            rsn_capabilities(2)
+
+        AKM suite byte 4 (OUI 00:0F:AC) = 2 o 6 -> PSK (WPA2-Personal)
+        AKM suite byte 4 (OUI 00:0F:AC) = 8      -> SAE (WPA3-Personal)
+
+        RSN capabilities (bits, little-endian):
+            bit 7 (0x80) = MFPC -> pmf_capable
+            bit 6 (0x40) = MFPR -> pmf_required
+        """
         if packet.haslayer(Dot11Beacon):
             cap = packet[Dot11Beacon].cap
             elt = packet.getlayer(Dot11Elt)
             while elt:
                 if elt.ID == 48:
                     rsn = elt.info
-                    if len(rsn) > 6:
-                        akm_count = int.from_bytes(rsn[6:8], 'little')
-                        if akm_count > 0 and len(rsn) > 10:
-                            akm = rsn[10:14]
-                            if akm[3] == 8:
-                                return "WPA3"
-                    return "WPA2"
+                    pmf_capable = False
+                    pmf_required = False
+                    has_psk = False
+                    has_sae = False
+                    try:
+                        offset = 2  # version
+                        offset += 4  # group cipher suite
+                        pairwise_count = int.from_bytes(
+                            rsn[offset:offset + 2], 'little'
+                        )
+                        offset += 2
+                        offset += 4 * pairwise_count  # pairwise suites
+                        akm_count = int.from_bytes(
+                            rsn[offset:offset + 2], 'little'
+                        )
+                        offset += 2
+                        for i in range(akm_count):
+                            suite = rsn[offset + 4 * i:offset + 4 * i + 4]
+                            if len(suite) < 4:
+                                continue
+                            akm_type = suite[3]
+                            if akm_type in (2, 6):
+                                has_psk = True
+                            elif akm_type == 8:
+                                has_sae = True
+                        offset += 4 * akm_count
+                        rsn_cap = rsn[offset:offset + 2]
+                        if len(rsn_cap) >= 1:
+                            pmf_capable = bool(rsn_cap[0] & 0x80)
+                            pmf_required = bool(rsn_cap[0] & 0x40)
+                    except Exception:
+                        pass
+
+                    if has_sae and has_psk:
+                        security = "WPA2/WPA3"
+                    elif has_sae:
+                        security = "WPA3"
+                    else:
+                        security = "WPA2"
+                    return security, pmf_capable, pmf_required
                 if elt.ID == 221 and elt.info[:3] == b'\x00\x50\xf2':
-                    return "WPA"
+                    return "WPA", False, False
                 try:
                     elt = elt.payload.getlayer(Dot11Elt)
                 except:
                     break
             if cap & 0x10:
-                return "WEP"
-            return "OPEN"
-        return "DESCONOCIDO"
+                return "WEP", False, False
+            return "OPEN", False, False
+        return "DESCONOCIDO", False, False
 
     def _process_packet(self, packet):
         if packet.haslayer(Dot11Beacon):
@@ -140,15 +191,18 @@ class Scanner:
                     elt = elt.payload.getlayer(Dot11Elt)
                 except:
                     break
-            security = self._get_security(packet)
+            security, pmf_capable, pmf_required = self._get_security(packet)
             signal = self._get_signal(packet)
             if bssid not in self.aps:
-                ap = AccessPoint(ssid, bssid, channel, security, signal)
+                ap = AccessPoint(ssid, bssid, channel, security, signal,
+                                  pmf_capable, pmf_required)
                 self.aps[bssid] = ap
                 if self.on_ap_found:
                     self.on_ap_found(ap)
             else:
                 self.aps[bssid].signal = signal
+                self.aps[bssid].pmf_capable = pmf_capable
+                self.aps[bssid].pmf_required = pmf_required
 
         elif packet.haslayer(Dot11) and packet.type == 2:
             ds = packet.FCfield & 0x3
@@ -176,7 +230,15 @@ class Scanner:
                 if self.on_client_found:
                     self.on_client_found(client)
             else:
-                self.clients[client_mac].signal = signal
+                client = self.clients[client_mac]
+                client.signal = signal
+                if client.bssid != ap_bssid:
+                    old_bssid = client.bssid
+                    if old_bssid in self.aps:
+                        self.aps[old_bssid].clients.discard(client_mac)
+                    client.bssid = ap_bssid
+                    if ap_bssid in self.aps:
+                        self.aps[ap_bssid].clients.add(client_mac)
 
         elif (packet.haslayer(Dot11) and
               packet.type == 0 and

@@ -73,6 +73,25 @@ class DecisionEngine:
         """
         security = ap.security.upper().strip()
 
+        # ── PMF obligatorio (802.11w) ─────────────────────────
+        # Si el AP exige PMF, las tramas de deauth no autenticadas
+        # se ignoran sin importar si el cifrado de datos es WPA2 o
+        # WPA3 (típico en iPhones/Android recientes que fuerzan PMF
+        # obligatorio incluso sobre AP WPA2).
+        if getattr(ap, "pmf_required", False):
+            return AttackPlan(
+                technique=AttackTechnique.CTS_FLOOD,
+                reason="AP con PMF obligatorio (802.11w MFPR). "
+                       "Las tramas de deauth no autenticadas se "
+                       "ignoran, independientemente de si el "
+                       "cifrado de datos es WPA2 o WPA3.",
+                risk_level="BAJO",
+                notes="Comportamiento habitual en iPhones y "
+                      "dispositivos Android recientes que exigen "
+                      "PMF. El CTS/RTS flood es la única técnica "
+                      "viable a nivel de protocolo MAC."
+            )
+
         # ── OPEN ─────────────────────────────────────────────
         if security == "OPEN":
             return AttackPlan(
@@ -108,6 +127,19 @@ class DecisionEngine:
 
         # ── WPA2 ─────────────────────────────────────────────
         elif security == "WPA2":
+            if getattr(ap, "pmf_capable", False):
+                return AttackPlan(
+                    technique=AttackTechnique.DEAUTH_EVIL_TWIN,
+                    reason="WPA2-Personal con PMF opcional "
+                           "(802.11w MFPC, no obligatorio). "
+                           "Deauth clásico en bucle continuo.",
+                    risk_level="MEDIO",
+                    notes="El AP no exige PMF, pero clientes "
+                          "modernos (iPhone/Android recientes) "
+                          "pueden negociarlo por defecto aunque "
+                          "no sea obligatorio, haciendo que el "
+                          "deauth falle contra ellos."
+                )
             return AttackPlan(
                 technique=AttackTechnique.DEAUTH_EVIL_TWIN,
                 reason="WPA2-Personal sin PMF (configuración "

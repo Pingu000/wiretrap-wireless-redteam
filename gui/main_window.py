@@ -315,6 +315,12 @@ class WireTrap(QMainWindow):
             self.btn_attack.setEnabled(True)
             self.log(f"AP seleccionado: {self.selected_ap.ssid} "
                      f"→ Técnica: {self.attack_plan.technique}")
+            if getattr(self.selected_ap, "pmf_required", False):
+                self.log("⚠ PMF obligatorio (802.11w MFPR) en este AP: "
+                          "el deauth clásico no funcionará.")
+            elif getattr(self.selected_ap, "pmf_capable", False):
+                self.log("⚠ PMF opcional (802.11w MFPC) en este AP: "
+                          "el deauth puede fallar contra clientes modernos.")
             # Fijar canal al del AP seleccionado
             if self.scanner and self.selected_ap.channel:
                 self.scanner.fixed_channel = self.selected_ap.channel
