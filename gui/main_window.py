@@ -36,7 +36,8 @@ class WireTrap(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("WireTrap v1.0 — Wireless Red Team Framework")
-        self.setMinimumSize(1100, 700)
+        self.setMinimumSize(1300, 820)
+        self.resize(1600, 950)
 
         # Estado interno
         self.selected_ap     = None
@@ -70,24 +71,25 @@ class WireTrap(QMainWindow):
         main_layout.setSpacing(8)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Header
+        # Header (barra compacta, no debe competir con las tablas)
         header = QHBoxLayout()
         title = QLabel("🔴 WireTrap v1.0")
-        title.setFont(QFont("Monospace", 16, QFont.Weight.Bold))
+        title.setFont(QFont("Monospace", 14, QFont.Weight.Bold))
 
-        self.iface_label  = QLabel("Interfaz Monitor:")
+        self.iface_label  = QLabel("Monitor:")
         self.iface_combo  = QComboBox()
-        self.iface_combo.setFixedWidth(130)
+        self.iface_combo.setFixedWidth(120)
 
-        self.iface2_label = QLabel("Interfaz AP:")
+        self.iface2_label = QLabel("AP:")
         self.iface2_combo = QComboBox()
-        self.iface2_combo.setFixedWidth(130)
+        self.iface2_combo.setFixedWidth(120)
 
-        self.out_label    = QLabel("Salida internet:")
+        self.out_label    = QLabel("Internet:")
         self.out_combo    = QComboBox()
-        self.out_combo.setFixedWidth(100)
+        self.out_combo.setFixedWidth(90)
 
         self.status_label = QLabel("● IDLE")
+        self.status_label.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
         self.status_label.setStyleSheet(
             "color: gray; font-weight: bold;"
         )
@@ -96,13 +98,13 @@ class WireTrap(QMainWindow):
         header.addStretch()
         header.addWidget(self.iface_label)
         header.addWidget(self.iface_combo)
-        header.addSpacing(10)
+        header.addSpacing(8)
         header.addWidget(self.iface2_label)
         header.addWidget(self.iface2_combo)
-        header.addSpacing(10)
+        header.addSpacing(8)
         header.addWidget(self.out_label)
         header.addWidget(self.out_combo)
-        header.addSpacing(20)
+        header.addSpacing(16)
         header.addWidget(self.status_label)
         main_layout.addLayout(header)
 
@@ -111,10 +113,14 @@ class WireTrap(QMainWindow):
         line.setStyleSheet("color: #444;")
         main_layout.addWidget(line)
 
-        # Tablas
+        # ── Tablas: panel PRINCIPAL, se lleva casi todo el espacio ──
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
+        table_font = QFont("Monospace", 11)
+        header_font = QFont("Monospace", 11, QFont.Weight.Bold)
+
         ap_group  = QGroupBox("APs DETECTADOS")
+        ap_group.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
         ap_layout = QVBoxLayout(ap_group)
         self.ap_table = QTableWidget()
         self.ap_table.setColumnCount(6)
@@ -124,17 +130,24 @@ class WireTrap(QMainWindow):
         self.ap_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
+        self.ap_table.horizontalHeader().setFont(header_font)
+        self.ap_table.horizontalHeader().setMinimumHeight(34)
+        self.ap_table.verticalHeader().setVisible(False)
+        self.ap_table.verticalHeader().setDefaultSectionSize(32)
+        self.ap_table.setFont(table_font)
         self.ap_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
         self.ap_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
         )
+        self.ap_table.setAlternatingRowColors(True)
         self.ap_table.itemClicked.connect(self._on_ap_selected)
         ap_layout.addWidget(self.ap_table)
         splitter.addWidget(ap_group)
 
         client_group  = QGroupBox("CLIENTES ASOCIADOS")
+        client_group.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
         client_layout = QVBoxLayout(client_group)
         self.client_table = QTableWidget()
         self.client_table.setColumnCount(4)
@@ -144,20 +157,28 @@ class WireTrap(QMainWindow):
         self.client_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
+        self.client_table.horizontalHeader().setFont(header_font)
+        self.client_table.horizontalHeader().setMinimumHeight(34)
+        self.client_table.verticalHeader().setVisible(False)
+        self.client_table.verticalHeader().setDefaultSectionSize(32)
+        self.client_table.setFont(table_font)
         self.client_table.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
         self.client_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
         )
+        self.client_table.setAlternatingRowColors(True)
         self.client_table.itemClicked.connect(self._on_client_selected)
         client_layout.addWidget(self.client_table)
         splitter.addWidget(client_group)
 
-        splitter.setSizes([550, 550])
-        main_layout.addWidget(splitter)
+        splitter.setSizes([800, 800])
+        # Las tablas son el panel principal: se llevan casi todo el
+        # espacio vertical disponible frente al panel de ataque/log.
+        main_layout.addWidget(splitter, 6)
 
-        # Panel de ataque
+        # ── Panel de ataque: secundario, compacto ────────────────
         attack_group  = QGroupBox("ESTADO DEL ATAQUE")
         attack_layout = QHBoxLayout(attack_group)
 
@@ -167,20 +188,21 @@ class WireTrap(QMainWindow):
             "Técnica:         —\n"
             "Estado:          IDLE"
         )
-        self.attack_info.setFont(QFont("Monospace", 9))
+        self.attack_info.setFont(QFont("Monospace", 10))
         self.attack_info.setMinimumWidth(320)
 
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setMaximumHeight(120)
-        self.log_output.setFont(QFont("Monospace", 8))
+        self.log_output.setMaximumHeight(110)
+        self.log_output.setFont(QFont("Monospace", 9))
         self.log_output.setPlaceholderText(
             "Los eventos aparecerán aquí..."
         )
 
         attack_layout.addWidget(self.attack_info)
         attack_layout.addWidget(self.log_output)
-        main_layout.addWidget(attack_group)
+        attack_group.setMaximumHeight(170)
+        main_layout.addWidget(attack_group, 1)
 
         # Botones
         btn_layout = QHBoxLayout()
@@ -201,7 +223,8 @@ class WireTrap(QMainWindow):
 
         for btn in [self.btn_scan, self.btn_attack,
                     self.btn_stop, self.btn_report]:
-            btn.setFixedHeight(38)
+            btn.setFixedHeight(42)
+            btn.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
             btn_layout.addWidget(btn)
 
         main_layout.addLayout(btn_layout)
@@ -216,19 +239,28 @@ class WireTrap(QMainWindow):
                 border: 1px solid #444;
                 border-radius: 4px;
                 margin-top: 8px;
-                padding-top: 8px;
+                padding-top: 10px;
                 font-weight: bold;
                 color: #00ff88;
             }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }
             QTableWidget {
                 background-color: #16213e;
+                alternate-background-color: #1b2a4a;
                 gridline-color: #333;
                 border: none;
+            }
+            QTableWidget::item {
+                padding: 4px;
             }
             QHeaderView::section {
                 background-color: #0f3460;
                 color: #00ff88;
-                padding: 4px;
+                padding: 6px;
                 border: none;
                 font-weight: bold;
             }
