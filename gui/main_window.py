@@ -622,8 +622,11 @@ class WireTrap(QMainWindow):
             channel=self.selected_ap.channel or 6,
             security=et_security,
             out_interface=iface_out,
-            wpa_passphrase=wpa_pass or "wiretrap123"
+            wpa_passphrase=wpa_pass or "wiretrap123",
+            target_bssid=self.selected_ap.bssid
         )
+        self.log(f"BSSID spoofed: {self.selected_ap.bssid} "
+                 f"→ wlan1 usará la MAC del AP legítimo")
 
         self.attacking = True
         self._update_attack_info()
