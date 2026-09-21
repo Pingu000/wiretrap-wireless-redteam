@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QTableWidget, QTableWidgetItem, QPushButton,
     QLabel, QComboBox, QHeaderView, QFrame, QSplitter,
-    QTextEdit, QGroupBox, QMessageBox
+    QTextEdit, QGroupBox, QMessageBox, QLineEdit
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont
@@ -199,6 +199,21 @@ class WireTrap(QMainWindow):
         self.attack_info.setFont(QFont("Monospace", 10))
         self.attack_info.setMinimumWidth(320)
 
+        # Campo de contraseña para Evil Twin WPA2
+        pass_layout = QVBoxLayout()
+        pass_label = QLabel("Contraseña Evil Twin (WPA2):")
+        pass_label.setFont(QFont("Monospace", 9))
+        self.wpa_pass_input = QLineEdit()
+        self.wpa_pass_input.setPlaceholderText(
+            "Dejar vacío = red OPEN  |  Poner contraseña real = WPA2 clonado"
+        )
+        self.wpa_pass_input.setFont(QFont("Monospace", 9))
+        self.wpa_pass_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.wpa_pass_input.setFixedWidth(340)
+        pass_layout.addWidget(pass_label)
+        pass_layout.addWidget(self.wpa_pass_input)
+        pass_layout.addStretch()
+
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setMaximumHeight(110)
@@ -208,6 +223,7 @@ class WireTrap(QMainWindow):
         )
 
         attack_layout.addWidget(self.attack_info)
+        attack_layout.addLayout(pass_layout)
         attack_layout.addWidget(self.log_output)
         attack_group.setMaximumHeight(170)
         main_layout.addWidget(attack_group, 1)
@@ -593,11 +609,20 @@ class WireTrap(QMainWindow):
                 f"[!] Evil Twin ERROR: {msg}"
             )
         )
+        wpa_pass = self.wpa_pass_input.text().strip()
+        if wpa_pass:
+            et_security = "WPA2"
+            self.log(f"Evil Twin: WPA2 con contraseña proporcionada")
+        else:
+            et_security = "OPEN"
+            self.log("Evil Twin: red OPEN (sin contraseña)")
+
         self.evil_twin.start(
             ssid=self.selected_ap.ssid,
             channel=self.selected_ap.channel or 6,
-            security="OPEN",
-            out_interface=iface_out
+            security=et_security,
+            out_interface=iface_out,
+            wpa_passphrase=wpa_pass or "wiretrap123"
         )
 
         self.attacking = True
