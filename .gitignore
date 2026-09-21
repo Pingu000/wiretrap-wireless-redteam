@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+*.bak
+*.log
+venv/
+.venv/
+*.swp
+.DS_Store
+captured_*.txt
+*.pcap
