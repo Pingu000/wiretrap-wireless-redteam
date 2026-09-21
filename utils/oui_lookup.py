@@ -1,70 +1,89 @@
 import requests
 import json
 import os
+import threading
 
-# Cache local para no repetir peticiones al mismo fabricante
 CACHE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "oui_cache.json"
 )
 
-def load_cache():
+def _load_cache():
     if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r") as f:
-            return json.load(f)
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
     return {}
 
-def save_cache(cache):
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f)
+# Cache cargado una sola vez al importar el módulo; no se relee en
+# cada llamada (evita cientos de lecturas de disco durante el escaneo).
+_cache = _load_cache()
+_pending: set = set()   # prefijos en vuelo para no lanzar duplicados
+_lock = threading.Lock()
 
-def get_vendor(mac: str) -> str:
-    """
-    Dado un MAC address, devuelve el fabricante del dispositivo.
-    Usa cache local para no repetir peticiones.
-    
-    Args:
-        mac: MAC address en formato AA:BB:CC:DD:EE:FF
-    
-    Returns:
-        Nombre del fabricante o 'Desconocido'
-    """
-    if not mac or len(mac) < 8:
-        return "Desconocido"
 
-    # Normalizamos el prefijo (primeros 3 bytes)
-    mac_prefix = mac.replace(":", "").replace("-", "").upper()[:6]
+def _save_cache():
+    try:
+        with open(CACHE_FILE, "w") as f:
+            json.dump(_cache, f)
+    except Exception:
+        pass
 
-    # Comprobamos cache primero
-    cache = load_cache()
-    if mac_prefix in cache:
-        return cache[mac_prefix]
 
-    # Consultamos la API
+def _fetch_vendor(mac_prefix: str):
+    """Consulta la API en segundo plano y actualiza el cache en éxito."""
     try:
         url = f"https://api.macvendors.com/{mac_prefix}"
         response = requests.get(url, timeout=3)
         if response.status_code == 200:
             vendor = response.text.strip()
-        else:
-            vendor = "Desconocido"
+            with _lock:
+                _cache[mac_prefix] = vendor
+                _pending.discard(mac_prefix)
+            _save_cache()
+            return
     except requests.exceptions.RequestException:
-        vendor = "Desconocido"
+        pass
+    # En caso de fallo NO escribimos nada en el cache; el próximo
+    # arranque volverá a intentarlo cuando haya red disponible.
+    with _lock:
+        _pending.discard(mac_prefix)
 
-    # Guardamos en cache
-    cache[mac_prefix] = vendor
-    save_cache(cache)
 
-    return vendor
+def get_vendor(mac: str) -> str:
+    """
+    Devuelve el fabricante asociado al prefijo OUI del MAC.
+    Retorna inmediatamente: desde cache si ya se conoce, o
+    "Desconocido" mientras lanza la consulta en un hilo daemon.
+    Nunca bloquea el hilo de captura de paquetes.
+    """
+    if not mac or len(mac) < 8:
+        return "Desconocido"
+
+    mac_prefix = mac.replace(":", "").replace("-", "").upper()[:6]
+
+    with _lock:
+        if mac_prefix in _cache:
+            return _cache[mac_prefix]
+        if mac_prefix not in _pending:
+            _pending.add(mac_prefix)
+            threading.Thread(
+                target=_fetch_vendor,
+                args=(mac_prefix,),
+                daemon=True
+            ).start()
+
+    return "Desconocido"
 
 
 if __name__ == "__main__":
-    # Test rápido con MACs conocidas
     test_macs = [
-        "00:1A:79:XX:XX:XX",  # Apple
-        "00:16:3E:XX:XX:XX",  # Xensource (Citrix)
-        "B8:27:EB:XX:XX:XX",  # Raspberry Pi
-        "AA:BB:CC:DD:EE:FF",  # Desconocido
+        "00:1A:79:XX:XX:XX",
+        "00:16:3E:XX:XX:XX",
+        "B8:27:EB:XX:XX:XX",
+        "AA:BB:CC:DD:EE:FF",
     ]
 
     print("Test OUI Lookup:")

@@ -43,6 +43,7 @@ class WireTrap(QMainWindow):
         self.selected_ap     = None
         self.selected_client = None
         self.attack_plan     = None
+        self.attacking       = False
 
         # Módulos core
         self.scanner  = None
@@ -57,6 +58,13 @@ class WireTrap(QMainWindow):
         self.bridge.log_message.connect(self.log)
         self.bridge.client_joined.connect(self._on_client_joined)
         self.bridge.attack_stopped.connect(self._on_attack_stopped)
+
+        # Timer para refrescar señal y contadores de la tabla de APs
+        # cada 2 s (el scanner actualiza los objetos internos pero no
+        # dispara señales en actualizaciones; esto cierra esa brecha).
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setInterval(2000)
+        self._refresh_timer.timeout.connect(self._refresh_ap_table)
 
         self.setup_ui()
         self.apply_styles()
@@ -378,13 +386,14 @@ class WireTrap(QMainWindow):
                       if self.attack_plan else "—")
         risk_str   = (self.attack_plan.risk_level
                       if self.attack_plan else "—")
+        estado     = "ATACANDO" if self.attacking else "IDLE"
 
         self.attack_info.setText(
             f"Objetivo AP:      {ap_str}\n"
             f"Objetivo Cliente: {client_str}\n"
             f"Técnica:          {tech_str}\n"
             f"Riesgo:           {risk_str}\n"
-            f"Estado:           IDLE"
+            f"Estado:           {estado}"
         )
 
     # ── Callbacks del scanner (desde threads) ─────────────────
@@ -455,10 +464,30 @@ class WireTrap(QMainWindow):
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.client_table.setItem(row, col, item)
 
+    def _refresh_ap_table(self):
+        """Refresca señal y contadores en la tabla de APs cada 2 s."""
+        if not self.scanner:
+            return
+        for row in range(self.ap_table.rowCount()):
+            bssid_item = self.ap_table.item(row, 1)
+            if not bssid_item:
+                continue
+            ap = self.scanner.aps.get(bssid_item.text())
+            if not ap:
+                continue
+            signal_item = self.ap_table.item(row, 4)
+            if signal_item:
+                signal_item.setText(f"{ap.signal} dBm")
+            count_item = self.ap_table.item(row, 5)
+            if count_item:
+                count_item.setText(str(len(ap.clients)))
+
     def _on_client_joined(self, info: str):
         self.log(f"[+] Cliente conectado al Evil Twin: {info}")
 
     def _on_attack_stopped(self):
+        self.attacking = False
+        self._update_attack_info()
         self.log("[!] Ataque detenido.")
         self.status_label.setText("● IDLE")
         self.status_label.setStyleSheet(
@@ -491,6 +520,7 @@ class WireTrap(QMainWindow):
         )
 
         self.scanner.start()
+        self._refresh_timer.start()
         self.status_label.setText("● ESCANEANDO")
         self.status_label.setStyleSheet(
             "color: #00ff88; font-weight: bold;"
@@ -557,6 +587,8 @@ class WireTrap(QMainWindow):
             out_interface=iface_out
         )
 
+        self.attacking = True
+        self._update_attack_info()
         self.status_label.setText("● ATACANDO")
         self.status_label.setStyleSheet(
             "color: #e94560; font-weight: bold;"

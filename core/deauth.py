@@ -60,6 +60,11 @@ class Deauther:
         Envía ráfagas de paquetes cada interval segundos.
         """
         packets = self._build_deauth(client_mac, ap_bssid)
+        # addr2=broadcast es inválido en 802.11 (el TA nunca puede ser
+        # de grupo); la mayoría de drivers descartan ese frame sin error.
+        # En modo broadcast solo enviamos la dirección AP→todos.
+        if client_mac == "ff:ff:ff:ff:ff:ff":
+            packets = packets[:1]
         count = 0
 
         while self.running:
