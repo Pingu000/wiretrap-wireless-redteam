@@ -111,56 +111,71 @@ class Scanner:
         """
         if packet.haslayer(Dot11Beacon):
             cap = packet[Dot11Beacon].cap
+
+            # Recorremos TODOS los IEs sin devolver en el primer match:
+            # un AP en modo mixto WPA/WPA2 anuncia el vendor IE legacy
+            # (ID 221) Y el RSN IE (ID 48) en la misma trama, y el orden
+            # entre ambos no está garantizado. El RSN (WPA2/WPA3 + PMF)
+            # tiene prioridad sobre el vendor IE legacy si ambos existen.
+            rsn_elt = None
+            has_wpa_vendor = False
             elt = packet.getlayer(Dot11Elt)
             while elt:
-                if elt.ID == 48:
-                    rsn = elt.info
-                    pmf_capable = False
-                    pmf_required = False
-                    has_psk = False
-                    has_sae = False
-                    try:
-                        offset = 2  # version
-                        offset += 4  # group cipher suite
-                        pairwise_count = int.from_bytes(
-                            rsn[offset:offset + 2], 'little'
-                        )
-                        offset += 2
-                        offset += 4 * pairwise_count  # pairwise suites
-                        akm_count = int.from_bytes(
-                            rsn[offset:offset + 2], 'little'
-                        )
-                        offset += 2
-                        for i in range(akm_count):
-                            suite = rsn[offset + 4 * i:offset + 4 * i + 4]
-                            if len(suite) < 4:
-                                continue
-                            akm_type = suite[3]
-                            if akm_type in (2, 6):
-                                has_psk = True
-                            elif akm_type == 8:
-                                has_sae = True
-                        offset += 4 * akm_count
-                        rsn_cap = rsn[offset:offset + 2]
-                        if len(rsn_cap) >= 1:
-                            pmf_capable = bool(rsn_cap[0] & 0x80)
-                            pmf_required = bool(rsn_cap[0] & 0x40)
-                    except Exception:
-                        pass
-
-                    if has_sae and has_psk:
-                        security = "WPA2/WPA3"
-                    elif has_sae:
-                        security = "WPA3"
-                    else:
-                        security = "WPA2"
-                    return security, pmf_capable, pmf_required
-                if elt.ID == 221 and elt.info[:3] == b'\x00\x50\xf2':
-                    return "WPA", False, False
+                if elt.ID == 48 and rsn_elt is None:
+                    rsn_elt = elt.info
+                elif elt.ID == 221 and elt.info[:3] == b'\x00\x50\xf2':
+                    has_wpa_vendor = True
                 try:
                     elt = elt.payload.getlayer(Dot11Elt)
                 except:
                     break
+
+            if rsn_elt is not None:
+                rsn = rsn_elt
+                pmf_capable = False
+                pmf_required = False
+                has_psk = False
+                has_sae = False
+                try:
+                    offset = 2  # version
+                    offset += 4  # group cipher suite
+                    pairwise_count = int.from_bytes(
+                        rsn[offset:offset + 2], 'little'
+                    )
+                    offset += 2
+                    offset += 4 * pairwise_count  # pairwise suites
+                    akm_count = int.from_bytes(
+                        rsn[offset:offset + 2], 'little'
+                    )
+                    offset += 2
+                    for i in range(akm_count):
+                        suite = rsn[offset + 4 * i:offset + 4 * i + 4]
+                        if len(suite) < 4:
+                            continue
+                        akm_type = suite[3]
+                        if akm_type in (2, 6):
+                            has_psk = True
+                        elif akm_type == 8:
+                            has_sae = True
+                    offset += 4 * akm_count
+                    rsn_cap = rsn[offset:offset + 2]
+                    if len(rsn_cap) >= 1:
+                        pmf_capable = bool(rsn_cap[0] & 0x80)
+                        pmf_required = bool(rsn_cap[0] & 0x40)
+                except Exception:
+                    pass
+
+                if has_sae and has_psk:
+                    security = "WPA2/WPA3"
+                elif has_sae:
+                    security = "WPA3"
+                else:
+                    security = "WPA2"
+                return security, pmf_capable, pmf_required
+
+            if has_wpa_vendor:
+                return "WPA", False, False
+
             if cap & 0x10:
                 return "WEP", False, False
             return "OPEN", False, False
