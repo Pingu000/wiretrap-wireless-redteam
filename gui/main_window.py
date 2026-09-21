@@ -545,6 +545,19 @@ class WireTrap(QMainWindow):
         if self.scanner:
             self.scanner.stop()
 
+        # Fijar explícitamente el canal de la interfaz monitora al del AP
+        # objetivo. El scanner lo fijaba mientras estaba vivo, pero al
+        # pararlo la interfaz puede quedarse en cualquier canal del hopper.
+        if self.selected_ap.channel:
+            import subprocess
+            subprocess.run(
+                ["iw", "dev", iface_mon, "set", "channel",
+                 str(self.selected_ap.channel)],
+                capture_output=True
+            )
+            self.log(f"Canal fijado en interfaz monitora: "
+                     f"{self.selected_ap.channel}")
+
         self.log(f"Iniciando ataque: {self.attack_plan.technique}")
         self.log(f"Razón: {self.attack_plan.reason}")
 
@@ -600,6 +613,10 @@ class WireTrap(QMainWindow):
         if self.deauther:
             self.deauther.stop()
         if self.evil_twin:
+            # Anular el callback on_stopped antes de parar para evitar
+            # que dispare attack_stopped dos veces (una aquí abajo y
+            # otra desde el propio evil_twin al terminar).
+            self.evil_twin.on_stopped = None
             self.evil_twin.stop()
         if self.scanner:
             self.scanner.stop()
