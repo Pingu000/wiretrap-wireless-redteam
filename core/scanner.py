@@ -58,10 +58,11 @@ class Scanner:
         self.on_client_found = None
 
     def _channel_hopper(self):
+        # Canales no-DFS únicamente (DFS = 52-140 bloqueados por rtw88/regulatorio)
+        # 2.4 GHz: 1-13 | 5 GHz no-DFS: 36-48 y 149-165
         channels = [1, 6, 11, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13,
-                    36, 40, 44, 48, 52, 56, 60, 64,
-                    100, 104, 108, 112, 116, 120, 124, 128,
-                    132, 136, 140, 149, 153, 157, 161, 165]
+                    36, 40, 44, 48,
+                    149, 153, 157, 161, 165]
         while self.scanning:
             # Si hay canal fijo, quedarse ahí
             if hasattr(self, 'fixed_channel') and self.fixed_channel:
