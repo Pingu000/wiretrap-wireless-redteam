@@ -22,11 +22,12 @@ from core.decision_engine import DecisionEngine, AttackTechnique
 # ── Bridge para emitir señales desde threads externos ─────────
 
 class SignalBridge(QObject):
-    ap_found     = pyqtSignal(object)
-    client_found = pyqtSignal(object)
-    log_message  = pyqtSignal(str)
-    client_joined = pyqtSignal(str)
-    attack_stopped = pyqtSignal()
+    ap_found         = pyqtSignal(object)
+    client_found     = pyqtSignal(object)
+    log_message      = pyqtSignal(str)
+    client_joined    = pyqtSignal(str)
+    attack_stopped   = pyqtSignal()
+    et_client_detail = pyqtSignal(str, str, str, str)  # mac, ip, hostname, hora
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -58,6 +59,7 @@ class WireTrap(QMainWindow):
         self.bridge.log_message.connect(self.log)
         self.bridge.client_joined.connect(self._on_client_joined)
         self.bridge.attack_stopped.connect(self._on_attack_stopped)
+        self.bridge.et_client_detail.connect(self._on_et_client_detail)
 
         # Timer para refrescar señal y contadores de la tabla de APs
         # cada 2 s (el scanner actualiza los objetos internos pero no
@@ -181,7 +183,34 @@ class WireTrap(QMainWindow):
         client_layout.addWidget(self.client_table)
         splitter.addWidget(client_group)
 
-        splitter.setSizes([800, 800])
+        # ── Panel Evil Twin: igual estilo que los otros dos ───────
+        self.et_group = QGroupBox("EVIL TWIN -- CLIENTES CAPTURADOS")
+        self.et_group.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        et_layout = QVBoxLayout(self.et_group)
+        self.et_table = QTableWidget()
+        self.et_table.setColumnCount(5)
+        self.et_table.setHorizontalHeaderLabels(
+            ["Hora", "MAC", "IP", "Hostname", "Fabricante"]
+        )
+        self.et_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.et_table.horizontalHeader().setFont(header_font)
+        self.et_table.horizontalHeader().setMinimumHeight(34)
+        self.et_table.verticalHeader().setVisible(False)
+        self.et_table.verticalHeader().setDefaultSectionSize(32)
+        self.et_table.setFont(table_font)
+        self.et_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
+        self.et_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.et_table.setAlternatingRowColors(True)
+        et_layout.addWidget(self.et_table)
+        splitter.addWidget(self.et_group)
+
+        splitter.setSizes([700, 600, 700])
         # Las tablas son el panel principal: se llevan casi todo el
         # espacio vertical disponible frente al panel de ataque/log.
         main_layout.addWidget(splitter, 6)
@@ -199,19 +228,31 @@ class WireTrap(QMainWindow):
         self.attack_info.setFont(QFont("Monospace", 10))
         self.attack_info.setMinimumWidth(320)
 
-        # Campo de contraseña para Evil Twin WPA2
-        pass_layout = QVBoxLayout()
-        pass_label = QLabel("Contraseña Evil Twin (WPA2):")
-        pass_label.setFont(QFont("Monospace", 9))
+        # Campo de contraseña Evil Twin — rediseñado
+        pass_frame = QFrame()
+        pass_frame.setStyleSheet(
+            "QFrame { background: #0a1f0a; border: 1px solid #00aa44; "
+            "border-radius: 6px; padding: 4px; }"
+        )
+        pass_inner = QVBoxLayout(pass_frame)
+        pass_inner.setContentsMargins(8, 4, 8, 4)
+        pass_label = QLabel("  Contrasena Evil Twin (WPA2)")
+        pass_label.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+        pass_label.setStyleSheet("color: #00ff88; border: none; background: transparent;")
         self.wpa_pass_input = QLineEdit()
         self.wpa_pass_input.setPlaceholderText(
-            "Dejar vacío = red OPEN  |  Poner contraseña real = WPA2 clonado"
+            "Vacio = red OPEN   |   Contrasena real = WPA2 clonado"
         )
-        self.wpa_pass_input.setFont(QFont("Monospace", 9))
-        self.wpa_pass_input.setEchoMode(QLineEdit.EchoMode.Password)
-        self.wpa_pass_input.setFixedWidth(340)
-        pass_layout.addWidget(pass_label)
-        pass_layout.addWidget(self.wpa_pass_input)
+        self.wpa_pass_input.setFont(QFont("Monospace", 10))
+        self.wpa_pass_input.setStyleSheet(
+            "QLineEdit { background: #0d2b0d; color: #00ff88; "
+            "border: none; padding: 4px; border-radius: 3px; }"
+        )
+        self.wpa_pass_input.setFixedWidth(360)
+        pass_inner.addWidget(pass_label)
+        pass_inner.addWidget(self.wpa_pass_input)
+        pass_layout = QVBoxLayout()
+        pass_layout.addWidget(pass_frame)
         pass_layout.addStretch()
 
         self.log_output = QTextEdit()
@@ -499,7 +540,35 @@ class WireTrap(QMainWindow):
                 count_item.setText(str(len(ap.clients)))
 
     def _on_client_joined(self, info: str):
-        self.log(f"[+] Cliente conectado al Evil Twin: {info}")
+        import re
+        from datetime import datetime
+        self.log(f"[+] Cliente en Evil Twin: {info}")
+        match = re.search(
+            r'DHCPACK\(\S+\)\s+(\d+\.\d+\.\d+\.\d+)\s+'
+            r'([0-9a-fA-F:]{17})(?:\s+(\S+))?',
+            info
+        )
+        if match:
+            ip       = match.group(1)
+            mac      = match.group(2).lower()
+            hostname = match.group(3) or "--"
+            hora     = datetime.now().strftime("%H:%M:%S")
+            self.bridge.et_client_detail.emit(mac, ip, hostname, hora)
+
+    def _on_et_client_detail(self, mac, ip, hostname, hora):
+        from utils.oui_lookup import get_vendor
+        vendor = get_vendor(mac)
+        row = self.et_table.rowCount()
+        self.et_table.insertRow(row)
+        for col, val in enumerate([hora, mac, ip, hostname, vendor]):
+            item = QTableWidgetItem(val)
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setForeground(QColor("#e94560"))
+            self.et_table.setItem(row, col, item)
+        self.et_group.setStyleSheet(
+            "QGroupBox { border: 2px solid #e94560; color: #e94560; "
+            "border-radius: 4px; margin-top: 8px; padding-top: 10px; }"
+        )
 
     def _on_attack_stopped(self):
         self.attacking = False
@@ -509,6 +578,7 @@ class WireTrap(QMainWindow):
         self.status_label.setStyleSheet(
             "color: gray; font-weight: bold;"
         )
+        self.et_group.setStyleSheet("")
         self.btn_stop.setEnabled(False)
         self.btn_attack.setEnabled(True)
         self.btn_report.setEnabled(True)
@@ -628,6 +698,11 @@ class WireTrap(QMainWindow):
         self.log(f"BSSID spoofed: {self.selected_ap.bssid} "
                  f"→ wlan1 usará la MAC del AP legítimo")
 
+        self.et_table.setRowCount(0)
+        self.et_group.setStyleSheet(
+            "QGroupBox { border: 1px solid #ffaa00; color: #ffaa00; "
+            "border-radius: 4px; margin-top: 8px; padding-top: 10px; }"
+        )
         self.attacking = True
         self._update_attack_info()
         self.status_label.setText("● ATACANDO")
