@@ -692,11 +692,10 @@ class WireTrap(QMainWindow):
             channel=self.selected_ap.channel or 6,
             security=et_security,
             out_interface=iface_out,
-            wpa_passphrase=wpa_pass or "wiretrap123",
-            target_bssid=self.selected_ap.bssid
+            wpa_passphrase=wpa_pass or "wiretrap123"
         )
-        self.log(f"BSSID spoofed: {self.selected_ap.bssid} "
-                 f"→ wlan1 usará la MAC del AP legítimo")
+        self.log(f"Usando MAC natural de la antena (Natural Roaming Mode "
+                 f"para evadir protecciones PMF/WPA3)")
 
         self.et_table.setRowCount(0)
         self.et_group.setStyleSheet(
