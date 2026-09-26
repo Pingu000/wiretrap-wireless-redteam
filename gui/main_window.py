@@ -189,7 +189,7 @@ class WireTrap(QMainWindow):
         main_layout.addWidget(splitter, 6)
 
         # ── Panel Evil Twin — Clientes capturados ─────────────────
-        self._et_panel = QGroupBox("🕵  EVIL TWIN — CLIENTES CAPTURADOS")
+        self._et_panel = QGroupBox("[ET]  EVIL TWIN -- CLIENTES CAPTURADOS")
         self._et_panel.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
         et_layout = QVBoxLayout(self._et_panel)
         self.et_table = QTableWidget()
