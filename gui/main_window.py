@@ -22,12 +22,11 @@ from core.decision_engine import DecisionEngine, AttackTechnique
 # ── Bridge para emitir señales desde threads externos ─────────
 
 class SignalBridge(QObject):
-    ap_found         = pyqtSignal(object)
-    client_found     = pyqtSignal(object)
-    log_message      = pyqtSignal(str)
-    client_joined    = pyqtSignal(str)
-    attack_stopped   = pyqtSignal()
-    et_client_detail = pyqtSignal(str, str, str, str)  # mac, ip, hostname, hora
+    ap_found     = pyqtSignal(object)
+    client_found = pyqtSignal(object)
+    log_message  = pyqtSignal(str)
+    client_joined = pyqtSignal(str)
+    attack_stopped = pyqtSignal()
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -59,7 +58,6 @@ class WireTrap(QMainWindow):
         self.bridge.log_message.connect(self.log)
         self.bridge.client_joined.connect(self._on_client_joined)
         self.bridge.attack_stopped.connect(self._on_attack_stopped)
-        self.bridge.et_client_detail.connect(self._on_et_client_detail)
 
         # Timer para refrescar señal y contadores de la tabla de APs
         # cada 2 s (el scanner actualiza los objetos internos pero no
@@ -187,30 +185,6 @@ class WireTrap(QMainWindow):
         # Las tablas son el panel principal: se llevan casi todo el
         # espacio vertical disponible frente al panel de ataque/log.
         main_layout.addWidget(splitter, 6)
-
-        # ── Panel Evil Twin — Clientes capturados ─────────────────
-        self._et_panel = QGroupBox("[ET]  EVIL TWIN -- CLIENTES CAPTURADOS")
-        self._et_panel.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
-        et_layout = QVBoxLayout(self._et_panel)
-        self.et_table = QTableWidget()
-        self.et_table.setColumnCount(5)
-        self.et_table.setHorizontalHeaderLabels(
-            ["Hora", "MAC", "IP", "Hostname", "Fabricante"]
-        )
-        self.et_table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Stretch
-        )
-        self.et_table.horizontalHeader().setFont(header_font)
-        self.et_table.horizontalHeader().setMinimumHeight(34)
-        self.et_table.verticalHeader().setVisible(False)
-        self.et_table.verticalHeader().setDefaultSectionSize(32)
-        self.et_table.setFont(table_font)
-        self.et_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.et_table.setAlternatingRowColors(True)
-        self.et_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        et_layout.addWidget(self.et_table)
-        self._et_panel.setMaximumHeight(180)
-        main_layout.addWidget(self._et_panel, 2)
 
         # ── Panel de ataque: secundario, compacto ────────────────
         attack_group  = QGroupBox("ESTADO DEL ATAQUE")
@@ -525,39 +499,7 @@ class WireTrap(QMainWindow):
                 count_item.setText(str(len(ap.clients)))
 
     def _on_client_joined(self, info: str):
-        import re
-        from datetime import datetime
         self.log(f"[+] Cliente conectado al Evil Twin: {info}")
-        # Parsear línea dnsmasq: DHCPACK(iface) IP MAC [hostname]
-        match = re.search(
-            r'DHCPACK\(\S+\)\s+(\d+\.\d+\.\d+\.\d+)\s+'
-            r'([0-9a-fA-F:]{17})(?:\s+(\S+))?',
-            info
-        )
-        if match:
-            ip       = match.group(1)
-            mac      = match.group(2).lower()
-            hostname = match.group(3) or "—"
-            hora     = datetime.now().strftime("%H:%M:%S")
-            self.bridge.et_client_detail.emit(mac, ip, hostname, hora)
-
-    def _on_et_client_detail(self, mac: str, ip: str,
-                              hostname: str, hora: str):
-        from utils.oui_lookup import get_vendor
-        vendor = get_vendor(mac)
-        row = self.et_table.rowCount()
-        self.et_table.insertRow(row)
-        for col, val in enumerate([hora, mac, ip, hostname, vendor]):
-            item = QTableWidgetItem(val)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item.setForeground(QColor("#e94560"))
-            self.et_table.setItem(row, col, item)
-        # Borde rojo intenso cuando hay clientes capturados
-        self._et_panel.setStyleSheet(
-            "QGroupBox { border: 2px solid #e94560; "
-            "color: #e94560; border-radius: 4px; "
-            "margin-top: 8px; padding-top: 10px; }"
-        )
 
     def _on_attack_stopped(self):
         self.attacking = False
@@ -567,8 +509,6 @@ class WireTrap(QMainWindow):
         self.status_label.setStyleSheet(
             "color: gray; font-weight: bold;"
         )
-        # Resetear panel ET a estado inactivo
-        self._et_panel.setStyleSheet("")
         self.btn_stop.setEnabled(False)
         self.btn_attack.setEnabled(True)
         self.btn_report.setEnabled(True)
@@ -688,13 +628,6 @@ class WireTrap(QMainWindow):
         self.log(f"BSSID spoofed: {self.selected_ap.bssid} "
                  f"→ wlan1 usará la MAC del AP legítimo")
 
-        # Activar panel Evil Twin
-        self.et_table.setRowCount(0)
-        self._et_panel.setStyleSheet(
-            "QGroupBox { border: 1px solid #ffaa00; "
-            "color: #ffaa00; border-radius: 4px; "
-            "margin-top: 8px; padding-top: 10px; }"
-        )
         self.attacking = True
         self._update_attack_info()
         self.status_label.setText("● ATACANDO")
