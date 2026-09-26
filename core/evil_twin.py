@@ -271,7 +271,7 @@ log-dhcp
                 ["dnsmasq", "-C", self.dnsmasq_conf,
                  "--no-daemon"],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+                stderr=subprocess.STDOUT
             )
 
             self.running = True
