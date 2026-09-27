@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QTableWidget, QTableWidgetItem, QPushButton,
     QLabel, QComboBox, QHeaderView, QFrame, QSplitter,
-    QTextEdit, QGroupBox, QMessageBox, QLineEdit
+    QTextEdit, QGroupBox, QMessageBox, QLineEdit,
+    QStackedWidget, QCheckBox
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont
@@ -77,14 +78,90 @@ class WireTrap(QMainWindow):
     def setup_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
+        main_base_layout = QVBoxLayout(central)
+        main_base_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.stack = QStackedWidget()
+        main_base_layout.addWidget(self.stack)
+
+        self.page_launcher = QWidget()
+        self._setup_launcher_ui(self.page_launcher)
+        self.stack.addWidget(self.page_launcher)
+
+        self.page_deauth = QWidget()
+        self._setup_deauth_ui(self.page_deauth)
+        self.stack.addWidget(self.page_deauth)
+
+        self.stack.setCurrentIndex(0)
+
+    def _setup_launcher_ui(self, parent_widget):
+        layout = QVBoxLayout(parent_widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        title = QLabel("🔴 WireTrap v1.0")
+        title.setFont(QFont("Monospace", 32, QFont.Weight.Bold))
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("color: #ff3333; margin-bottom: 30px;")
+        layout.addWidget(title)
+        
+        subtitle = QLabel("Selecciona un Módulo de Ataque")
+        subtitle.setFont(QFont("Monospace", 14))
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setStyleSheet("color: #aaaaaa; margin-bottom: 40px;")
+        layout.addWidget(subtitle)
+
+        grid = QVBoxLayout()
+        grid.setSpacing(15)
+
+        btn_deauth_et = QPushButton("💥 Deauth + Evil Twin")
+        btn_deauth_et.setFixedHeight(60)
+        btn_deauth_et.setFixedWidth(400)
+        btn_deauth_et.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        btn_deauth_et.setStyleSheet("background-color: #331111; border: 2px solid #e94560; color: white;")
+        btn_deauth_et.clicked.connect(lambda: self.stack.setCurrentIndex(1))
+
+        btn_pmkid = QPushButton("🔒 Ataque PMKID (Clientless) [Próximamente]")
+        btn_pmkid.setFixedHeight(60)
+        btn_pmkid.setFixedWidth(400)
+        btn_pmkid.setFont(QFont("Monospace", 12))
+        btn_pmkid.setEnabled(False)
+
+        btn_captive = QPushButton("🎣 Portal Cautivo [Próximamente]")
+        btn_captive.setFixedHeight(60)
+        btn_captive.setFixedWidth(400)
+        btn_captive.setFont(QFont("Monospace", 12))
+        btn_captive.setEnabled(False)
+
+        btn_dns = QPushButton("🌍 DNS Spoofing [Próximamente]")
+        btn_dns.setFixedHeight(60)
+        btn_dns.setFixedWidth(400)
+        btn_dns.setFont(QFont("Monospace", 12))
+        btn_dns.setEnabled(False)
+
+        grid.addWidget(btn_deauth_et, alignment=Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(btn_pmkid, alignment=Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(btn_captive, alignment=Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(btn_dns, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        layout.addLayout(grid)
+
+    def _setup_deauth_ui(self, parent_widget):
+        main_layout = QVBoxLayout(parent_widget)
         main_layout.setSpacing(8)
         main_layout.setContentsMargins(10, 10, 10, 10)
 
         # Header (barra compacta, no debe competir con las tablas)
         header = QHBoxLayout()
-        title = QLabel("🔴 WireTrap v1.0")
-        title.setFont(QFont("Monospace", 14, QFont.Weight.Bold))
+        
+        self.btn_back = QPushButton("⬅ Volver al Menú")
+        self.btn_back.setFixedWidth(150)
+        self.btn_back.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        header.addWidget(self.btn_back)
+        header.addSpacing(20)
+
+        title = QLabel("🔴 WireTrap: Deauth + Evil Twin")
+        title.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
 
         self.iface_label  = QLabel("Monitor:")
         self.iface_combo  = QComboBox()
@@ -208,6 +285,7 @@ class WireTrap(QMainWindow):
         )
         self.et_table.setAlternatingRowColors(True)
         et_layout.addWidget(self.et_table)
+        self.et_group.setVisible(False)  # HIDDEN BY DEFAULT
         splitter.addWidget(self.et_group)
 
         splitter.setSizes([700, 600, 700])
@@ -229,19 +307,24 @@ class WireTrap(QMainWindow):
         self.attack_info.setMinimumWidth(320)
 
         # Campo de contraseña Evil Twin — rediseñado
-        pass_frame = QFrame()
-        pass_frame.setStyleSheet(
+        self.chk_eviltwin = QCheckBox("Habilitar AP Falso (Evil Twin)")
+        self.chk_eviltwin.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.chk_eviltwin.setStyleSheet("color: #00ff88; margin-bottom: 5px;")
+        self.chk_eviltwin.stateChanged.connect(self._on_et_checkbox_changed)
+
+        self.pass_frame = QFrame()
+        self.pass_frame.setStyleSheet(
             "QFrame { background: #0a1f0a; border: 1px solid #00aa44; "
             "border-radius: 6px; padding: 4px; }"
         )
-        pass_inner = QVBoxLayout(pass_frame)
+        pass_inner = QVBoxLayout(self.pass_frame)
         pass_inner.setContentsMargins(8, 4, 8, 4)
-        pass_label = QLabel("  Contrasena Evil Twin (WPA2)")
+        pass_label = QLabel("  Contraseña Evil Twin (WPA2)")
         pass_label.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
         pass_label.setStyleSheet("color: #00ff88; border: none; background: transparent;")
         self.wpa_pass_input = QLineEdit()
         self.wpa_pass_input.setPlaceholderText(
-            "Vacio = red OPEN   |   Contrasena real = WPA2 clonado"
+            "Vacio = red OPEN   |   Contraseña real = WPA2 clonado"
         )
         self.wpa_pass_input.setFont(QFont("Monospace", 10))
         self.wpa_pass_input.setStyleSheet(
@@ -251,8 +334,12 @@ class WireTrap(QMainWindow):
         self.wpa_pass_input.setFixedWidth(360)
         pass_inner.addWidget(pass_label)
         pass_inner.addWidget(self.wpa_pass_input)
+        
+        self.pass_frame.setVisible(False) # HIDDEN BY DEFAULT
+
         pass_layout = QVBoxLayout()
-        pass_layout.addWidget(pass_frame)
+        pass_layout.addWidget(self.chk_eviltwin)
+        pass_layout.addWidget(self.pass_frame)
         pass_layout.addStretch()
 
         self.log_output = QTextEdit()
@@ -275,24 +362,25 @@ class WireTrap(QMainWindow):
         self.btn_scan   = QPushButton("▶  Iniciar Escaneo")
         self.btn_attack = QPushButton("⚡  Iniciar Ataque")
         self.btn_stop   = QPushButton("■  Detener Todo")
-        self.btn_report = QPushButton("📄  Generar Informe")
 
         self.btn_attack.setEnabled(False)
         self.btn_stop.setEnabled(False)
-        self.btn_report.setEnabled(False)
 
         self.btn_scan.clicked.connect(self._on_scan_clicked)
         self.btn_attack.clicked.connect(self._on_attack_clicked)
         self.btn_stop.clicked.connect(self._on_stop_clicked)
-        self.btn_report.clicked.connect(self._on_report_clicked)
 
-        for btn in [self.btn_scan, self.btn_attack,
-                    self.btn_stop, self.btn_report]:
+        for btn in [self.btn_scan, self.btn_attack, self.btn_stop]:
             btn.setFixedHeight(42)
             btn.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
             btn_layout.addWidget(btn)
 
         main_layout.addLayout(btn_layout)
+
+    def _on_et_checkbox_changed(self, state):
+        is_checked = (state == 2)  # Qt.CheckState.Checked = 2
+        self.pass_frame.setVisible(is_checked)
+        self.et_group.setVisible(is_checked)
 
     def apply_styles(self):
         self.setStyleSheet("""
@@ -581,7 +669,6 @@ class WireTrap(QMainWindow):
         self.et_group.setStyleSheet("")
         self.btn_stop.setEnabled(False)
         self.btn_attack.setEnabled(True)
-        self.btn_report.setEnabled(True)
 
     # ── Botones ───────────────────────────────────────────────
 
@@ -661,47 +748,50 @@ class WireTrap(QMainWindow):
         )
         self.deauther.start(client_mac, self.selected_ap.bssid)
 
-        # Iniciar evil twin
-        self.evil_twin = EvilTwin(iface_ap)
-        self.evil_twin.on_started = (
-            lambda s, ch: self.bridge.log_message.emit(
-                f"Evil Twin activo: {s} (canal {ch})"
+        # Iniciar evil twin (solo si la casilla está marcada)
+        if self.chk_eviltwin.isChecked():
+            self.evil_twin = EvilTwin(iface_ap)
+            self.evil_twin.on_started = (
+                lambda s, ch: self.bridge.log_message.emit(
+                    f"Evil Twin activo: {s} (canal {ch})"
+                )
             )
-        )
-        self.evil_twin.on_client_join = (
-            lambda info: self.bridge.client_joined.emit(info)
-        )
-        self.evil_twin.on_stopped = (
-            lambda: self.bridge.attack_stopped.emit()
-        )
-        self.evil_twin.on_error = (
-            lambda msg: self.bridge.log_message.emit(
-                f"[!] Evil Twin ERROR: {msg}"
+            self.evil_twin.on_client_join = (
+                lambda info: self.bridge.client_joined.emit(info)
             )
-        )
-        wpa_pass = self.wpa_pass_input.text().strip()
-        if wpa_pass:
-            et_security = "WPA2"
-            self.log(f"Evil Twin: WPA2 con contraseña proporcionada")
+            self.evil_twin.on_stopped = (
+                lambda: self.bridge.attack_stopped.emit()
+            )
+            self.evil_twin.on_error = (
+                lambda msg: self.bridge.log_message.emit(
+                    f"[!] Evil Twin ERROR: {msg}"
+                )
+            )
+            wpa_pass = self.wpa_pass_input.text().strip()
+            if wpa_pass:
+                et_security = "WPA2"
+                self.log(f"Evil Twin: WPA2 con contraseña proporcionada")
+            else:
+                et_security = "OPEN"
+                self.log("Evil Twin: red OPEN (sin contraseña)")
+
+            self.evil_twin.start(
+                ssid=self.selected_ap.ssid,
+                channel=self.selected_ap.channel or 6,
+                security=et_security,
+                out_interface=iface_out,
+                wpa_passphrase=wpa_pass or "wiretrap123"
+            )
+            self.log(f"Usando MAC natural de la antena (Natural Roaming Mode "
+                     f"para evadir protecciones PMF/WPA3)")
+
+            self.et_table.setRowCount(0)
+            self.et_group.setStyleSheet(
+                "QGroupBox { border: 1px solid #ffaa00; color: #ffaa00; "
+                "border-radius: 4px; margin-top: 8px; padding-top: 10px; }"
+            )
         else:
-            et_security = "OPEN"
-            self.log("Evil Twin: red OPEN (sin contraseña)")
-
-        self.evil_twin.start(
-            ssid=self.selected_ap.ssid,
-            channel=self.selected_ap.channel or 6,
-            security=et_security,
-            out_interface=iface_out,
-            wpa_passphrase=wpa_pass or "wiretrap123"
-        )
-        self.log(f"Usando MAC natural de la antena (Natural Roaming Mode "
-                 f"para evadir protecciones PMF/WPA3)")
-
-        self.et_table.setRowCount(0)
-        self.et_group.setStyleSheet(
-            "QGroupBox { border: 1px solid #ffaa00; color: #ffaa00; "
-            "border-radius: 4px; margin-top: 8px; padding-top: 10px; }"
-        )
+            self.log("Modo Deauth Puro (Evil Twin deshabilitado)")
         self.attacking = True
         self._update_attack_info()
         self.status_label.setText("● ATACANDO")
@@ -723,10 +813,6 @@ class WireTrap(QMainWindow):
         if self.scanner:
             self.scanner.stop()
         self.bridge.attack_stopped.emit()
-        self.btn_report.setEnabled(True)
-
-    def _on_report_clicked(self):
-        self.log("Generando informe... (próximo paso)")
 
     # ── Log ───────────────────────────────────────────────────
 
