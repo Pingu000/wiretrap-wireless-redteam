@@ -307,11 +307,12 @@ class WireTrap(QMainWindow):
         self.attack_info.setMinimumWidth(320)
 
         # Checkbox para Evil Twin
-        self.chk_eviltwin = QCheckBox("Habilitar AP Falso (Evil Twin)")
-        self.chk_eviltwin.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.chk_eviltwin = QCheckBox(" Habilitar AP Falso")
+        self.chk_eviltwin.setFont(QFont("Monospace", 14, QFont.Weight.Bold))
         self.chk_eviltwin.setStyleSheet(
-            "QCheckBox { color: #00ff88; margin: 10px; }"
-            "QCheckBox::indicator { width: 18px; height: 18px; }"
+            "QCheckBox { color: #00ff88; }"
+            "QCheckBox::indicator { width: 24px; height: 24px; border: 2px solid #00aa44; border-radius: 4px; background: #0a1f0a; }"
+            "QCheckBox::indicator:checked { background: #00ff88; border: 2px solid #00ff88; }"
         )
         self.chk_eviltwin.stateChanged.connect(self._on_et_checkbox_changed)
         
@@ -319,7 +320,8 @@ class WireTrap(QMainWindow):
         self.wpa_passphrase = ""
 
         pass_layout = QVBoxLayout()
-        pass_layout.addWidget(self.chk_eviltwin)
+        pass_layout.addStretch()
+        pass_layout.addWidget(self.chk_eviltwin, alignment=Qt.AlignmentFlag.AlignCenter)
         pass_layout.addStretch()
 
         self.log_output = QTextEdit()
