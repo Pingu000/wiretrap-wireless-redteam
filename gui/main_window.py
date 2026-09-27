@@ -306,40 +306,20 @@ class WireTrap(QMainWindow):
         self.attack_info.setFont(QFont("Monospace", 10))
         self.attack_info.setMinimumWidth(320)
 
-        # Campo de contraseña Evil Twin — rediseñado
+        # Checkbox para Evil Twin
         self.chk_eviltwin = QCheckBox("Habilitar AP Falso (Evil Twin)")
         self.chk_eviltwin.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
-        self.chk_eviltwin.setStyleSheet("color: #00ff88; margin-bottom: 5px;")
+        self.chk_eviltwin.setStyleSheet(
+            "QCheckBox { color: #00ff88; margin: 10px; }"
+            "QCheckBox::indicator { width: 18px; height: 18px; }"
+        )
         self.chk_eviltwin.stateChanged.connect(self._on_et_checkbox_changed)
-
-        self.pass_frame = QFrame()
-        self.pass_frame.setStyleSheet(
-            "QFrame { background: #0a1f0a; border: 1px solid #00aa44; "
-            "border-radius: 6px; padding: 4px; }"
-        )
-        pass_inner = QVBoxLayout(self.pass_frame)
-        pass_inner.setContentsMargins(8, 4, 8, 4)
-        pass_label = QLabel("  Contraseña Evil Twin (WPA2)")
-        pass_label.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
-        pass_label.setStyleSheet("color: #00ff88; border: none; background: transparent;")
-        self.wpa_pass_input = QLineEdit()
-        self.wpa_pass_input.setPlaceholderText(
-            "Vacio = red OPEN   |   Contraseña real = WPA2 clonado"
-        )
-        self.wpa_pass_input.setFont(QFont("Monospace", 10))
-        self.wpa_pass_input.setStyleSheet(
-            "QLineEdit { background: #0d2b0d; color: #00ff88; "
-            "border: none; padding: 4px; border-radius: 3px; }"
-        )
-        self.wpa_pass_input.setFixedWidth(360)
-        pass_inner.addWidget(pass_label)
-        pass_inner.addWidget(self.wpa_pass_input)
         
-        self.pass_frame.setVisible(False) # HIDDEN BY DEFAULT
+        # Propiedad nativa para guardar la pass temporal
+        self.wpa_passphrase = ""
 
         pass_layout = QVBoxLayout()
         pass_layout.addWidget(self.chk_eviltwin)
-        pass_layout.addWidget(self.pass_frame)
         pass_layout.addStretch()
 
         self.log_output = QTextEdit()
@@ -379,8 +359,54 @@ class WireTrap(QMainWindow):
 
     def _on_et_checkbox_changed(self, state):
         is_checked = (state == 2)  # Qt.CheckState.Checked = 2
-        self.pass_frame.setVisible(is_checked)
-        self.et_group.setVisible(is_checked)
+        if is_checked:
+            from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QHBoxLayout
+            from PyQt6.QtCore import Qt
+            from PyQt6.QtGui import QFont
+
+            dialog = QDialog(self)
+            dialog.setWindowTitle("Contraseña Evil Twin")
+            dialog.setFixedSize(450, 200)
+            dialog.setStyleSheet(
+                "QDialog { background: #0a1f0a; border: 2px solid #00aa44; border-radius: 8px; }"
+                "QLabel { color: #00ff88; font-weight: bold; font-family: Monospace; font-size: 11pt; }"
+                "QLineEdit { background: #0d2b0d; color: #00ff88; border: 1px solid #00ff88; padding: 8px; font-family: Monospace; font-size: 12pt; border-radius: 4px; }"
+                "QPushButton { background: #00aa44; color: black; font-weight: bold; border-radius: 4px; padding: 8px; font-family: Monospace; font-size: 11pt; }"
+                "QPushButton:hover { background: #00ff88; }"
+            )
+            layout = QVBoxLayout(dialog)
+            
+            lbl = QLabel("Introduce la contraseña para el Evil Twin:\n(Déjalo vacío para crear una red Abierta/OPEN)")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(lbl)
+            layout.addSpacing(10)
+            
+            inp = QLineEdit()
+            inp.setPlaceholderText("Ej: contrasena123")
+            layout.addWidget(inp)
+            layout.addSpacing(15)
+            
+            btn_layout = QHBoxLayout()
+            btn_ok = QPushButton("Aceptar")
+            btn_cancel = QPushButton("Cancelar")
+            btn_cancel.setStyleSheet("background: #555555; color: white;")
+            btn_cancel.clicked.connect(dialog.reject)
+            btn_ok.clicked.connect(dialog.accept)
+            btn_layout.addWidget(btn_cancel)
+            btn_layout.addWidget(btn_ok)
+            layout.addLayout(btn_layout)
+            
+            if dialog.exec():
+                self.wpa_passphrase = inp.text().strip()
+                self.et_group.setVisible(True)
+            else:
+                self.chk_eviltwin.blockSignals(True)
+                self.chk_eviltwin.setChecked(False)
+                self.chk_eviltwin.blockSignals(False)
+                self.et_group.setVisible(False)
+        else:
+            self.et_group.setVisible(False)
+            self.wpa_passphrase = ""
 
     def apply_styles(self):
         self.setStyleSheet("""
@@ -767,7 +793,7 @@ class WireTrap(QMainWindow):
                     f"[!] Evil Twin ERROR: {msg}"
                 )
             )
-            wpa_pass = self.wpa_pass_input.text().strip()
+            wpa_pass = getattr(self, "wpa_passphrase", "")
             if wpa_pass:
                 et_security = "WPA2"
                 self.log(f"Evil Twin: WPA2 con contraseña proporcionada")
