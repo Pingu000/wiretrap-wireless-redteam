@@ -850,10 +850,11 @@ class WireTrap(QMainWindow):
             self.log(f"Usando MAC natural de la antena (Natural Roaming Mode "
                      f"para evadir protecciones PMF/WPA3)")
 
-            self.sniffer = WireTrapSniffer(iface_ap)
+            actual_ap_iface = getattr(self.evil_twin, "ap_iface", iface_ap)
+            self.sniffer = WireTrapSniffer(actual_ap_iface)
             self.sniffer.on_data = lambda d: self.bridge.data_captured.emit(d)
             self.sniffer.start()
-            self.log(f"Módulo de Interceptación HTTP/DNS activo en {iface_ap}")
+            self.log(f"Módulo de Interceptación HTTP/DNS activo en {actual_ap_iface}")
 
             self.et_table.setRowCount(0)
             self.et_group.setStyleSheet(
