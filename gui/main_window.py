@@ -18,7 +18,8 @@ from core.scanner import Scanner, AccessPoint, Client
 from core.deauth import Deauther
 from core.evil_twin import EvilTwin
 from core.decision_engine import DecisionEngine, AttackTechnique
-
+from gui.dashboard_dialog import DashboardDialog
+from post_exploitation.sniffer import WireTrapSniffer
 
 # ── Bridge para emitir señales desde threads externos ─────────
 
@@ -29,6 +30,7 @@ class SignalBridge(QObject):
     client_joined    = pyqtSignal(str)
     attack_stopped   = pyqtSignal()
     et_client_detail = pyqtSignal(str, str, str, str)  # mac, ip, hostname, hora
+    data_captured    = pyqtSignal(object)
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -51,7 +53,10 @@ class WireTrap(QMainWindow):
         self.scanner  = None
         self.deauther = None
         self.evil_twin = None
+        self.sniffer  = None
         self.engine   = DecisionEngine()
+        
+        self.dashboards = []
 
         # Bridge de señales
         self.bridge = SignalBridge()
@@ -61,6 +66,7 @@ class WireTrap(QMainWindow):
         self.bridge.client_joined.connect(self._on_client_joined)
         self.bridge.attack_stopped.connect(self._on_attack_stopped)
         self.bridge.et_client_detail.connect(self._on_et_client_detail)
+        self.bridge.data_captured.connect(self._on_data_captured)
 
         # Timer para refrescar señal y contadores de la tabla de APs
         # cada 2 s (el scanner actualiza los objetos internos pero no
@@ -284,7 +290,18 @@ class WireTrap(QMainWindow):
             QTableWidget.EditTrigger.NoEditTriggers
         )
         self.et_table.setAlternatingRowColors(True)
+        self.et_table.cellDoubleClicked.connect(self._on_et_table_double_click)
         et_layout.addWidget(self.et_table)
+        
+        self.btn_global_dashboard = QPushButton("▶ Dashboard Global de Interceptación")
+        self.btn_global_dashboard.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.btn_global_dashboard.setStyleSheet(
+            "QPushButton { background: #00aa44; color: black; padding: 6px; border-radius: 4px; }"
+            "QPushButton:hover { background: #00ff88; }"
+        )
+        self.btn_global_dashboard.clicked.connect(lambda: self._open_client_dashboard(None))
+        et_layout.addWidget(self.btn_global_dashboard)
+
         self.et_group.setVisible(False)  # HIDDEN BY DEFAULT
         splitter.addWidget(self.et_group)
 
@@ -686,6 +703,26 @@ class WireTrap(QMainWindow):
             "border-radius: 4px; margin-top: 8px; padding-top: 10px; }"
         )
 
+    def _open_client_dashboard(self, mac=None):
+        initial = self.sniffer.captured if self.sniffer else []
+        dash = DashboardDialog(mac, self)
+        for d in initial:
+            dash.on_data_captured(d)
+        self.dashboards.append(dash)
+        dash.show()
+
+    def _on_et_table_double_click(self, row, column):
+        mac_item = self.et_table.item(row, 1)
+        if mac_item:
+            self._open_client_dashboard(mac_item.text())
+
+    def _on_data_captured(self, data):
+        self.log(f"[!] Tráfico interceptado: {data.data_type} ({data.source_ip})")
+        # Cleanup closed dashboards
+        self.dashboards = [d for d in self.dashboards if d.isVisible()]
+        for dash in self.dashboards:
+            dash.on_data_captured(data)
+
     def _on_attack_stopped(self):
         self.attacking = False
         self._update_attack_info()
@@ -813,6 +850,11 @@ class WireTrap(QMainWindow):
             self.log(f"Usando MAC natural de la antena (Natural Roaming Mode "
                      f"para evadir protecciones PMF/WPA3)")
 
+            self.sniffer = WireTrapSniffer(iface_ap)
+            self.sniffer.on_data = lambda d: self.bridge.data_captured.emit(d)
+            self.sniffer.start()
+            self.log(f"Módulo de Interceptación HTTP/DNS activo en {iface_ap}")
+
             self.et_table.setRowCount(0)
             self.et_group.setStyleSheet(
                 "QGroupBox { border: 1px solid #ffaa00; color: #ffaa00; "
@@ -838,6 +880,8 @@ class WireTrap(QMainWindow):
             # otra desde el propio evil_twin al terminar).
             self.evil_twin.on_stopped = None
             self.evil_twin.stop()
+        if self.sniffer:
+            self.sniffer.stop()
         if self.scanner:
             self.scanner.stop()
         self.bridge.attack_stopped.emit()
