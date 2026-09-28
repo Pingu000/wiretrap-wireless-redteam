@@ -58,8 +58,7 @@ class WPA2Crypto:
         cmd = [
             "hcxdumptool",
             "-i", self.interface,
-            "-w", self.output_pcap,
-            "--enable_status=15" # Verbose status output
+            "-w", self.output_pcap
         ]
         
         # Eliminar filtros restrictivos que hacen crashear versiones nuevas de hcx a menos que se use el flag nuevo bssid
@@ -67,8 +66,7 @@ class WPA2Crypto:
             cmd = [
                 "hcxdumptool",
                 "-i", self.interface,
-                "-w", self.output_pcap,
-                "--enable_status=15"
+                "-w", self.output_pcap
             ]
 
         self._log(f"[*] Lanzando hcxdumptool contra BSSID: {target_bssid}")
