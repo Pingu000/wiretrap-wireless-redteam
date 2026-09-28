@@ -1087,6 +1087,8 @@ class WireTrap(QMainWindow):
         if self.scanner:
             self.scanner.stop()
             
+        self.log_wpa2(f"\\n[⏳] Iniciando captura silenciosa sobre la red (el PCAP absorberá tráfico en background)...")
+            
         if self.selected_ap.channel:
             import subprocess
             iface_mon = self.wpa2_iface_combo.currentText()
