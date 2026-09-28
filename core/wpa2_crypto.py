@@ -15,6 +15,7 @@ class WPA2Crypto:
         
         self.output_pcap = "/tmp/wiretrap_pmkid.pcapng"
         self.output_hash = "/tmp/wiretrap_hash.hc22000"
+        self.wordlist = ""
 
         # Callbacks
         self.on_log = None     # fn(str)
@@ -139,15 +140,42 @@ class WPA2Crypto:
 
             if os.path.exists(self.output_hash) and os.path.getsize(self.output_hash) > 0:
                 self._log(f"[✓] ÉXITO: Hash WPA2 extraído correctamente -> {self.output_hash}")
-                self._log("[*] Usa Hashcat para romperlo: hashcat -m 22000 /tmp/wiretrap_hash.hc22000 dicc.txt")
                 if self.on_success:
                     self.on_success(self.output_hash)
+                    
+                if self.wordlist:
+                    self._run_hashcat()
             else:
                  if self.on_error:
                     self.on_error("Fallo Criptográfico: El PCAP capturado no contenía PMKIDs ni Handshakes válidos.")
         except Exception as e:
             if self.on_error:
                 self.on_error(f"Error procesando herramienta de hashes: {e}")
+
+    def _run_hashcat(self):
+        self._log(f"\n[*] INICIANDO CRACKEO HASHCAT (Diccionario: {self.wordlist}) ...")
+        cmd = [
+            "hashcat",
+            "-m", "22000",
+            "-a", "0",
+            self.output_hash,
+            self.wordlist
+        ]
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+            for line in p.stdout:
+                line = line.strip()
+                if line:
+                    self._log(f"  {line}")
+                if not self.running:
+                    p.terminate()
+                    break
+            p.wait()
+            self._log("[✓] Proceso Hashcat finalizado.")
+        except FileNotFoundError:
+            self._log("❌ Error: 'hashcat' no está instalado en el sistema.")
+        except Exception as e:
+            self._log(f"❌ Error al ejecutar hashcat: {e}")
 
     def stop(self):
         self.running = False

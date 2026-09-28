@@ -910,20 +910,32 @@ class WireTrap(QMainWindow):
 
         title = QLabel("🔒 WireTrap: Ataques WPA2 (PMKID & Handshakes)")
         title.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        header.addWidget(title)
+        
+        header.addStretch()
+
+        self.wpa2_dict_label = QLabel("Diccionario:")
+        self.wpa2_dict_label.setFont(QFont("Monospace", 10))
+        self.wpa2_dict_input = QLineEdit("/usr/share/wordlists/rockyou.txt")
+        self.wpa2_dict_input.setMinimumWidth(250)
+        self.wpa2_dict_input.setStyleSheet("background-color: #222; color: #fff; border: 1px solid #555; padding: 2px;")
         
         self.wpa2_iface_label = QLabel("Interfaz Monitor (Alfa):")
+        self.wpa2_iface_label.setFont(QFont("Monospace", 10))
         self.wpa2_iface_combo = QComboBox()
-        self.wpa2_iface_combo.setFixedWidth(120)
+        self.wpa2_iface_combo.setMinimumWidth(150)
 
         self.wpa2_status = QLabel("● IDLE")
         self.wpa2_status.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
         self.wpa2_status.setStyleSheet("color: gray; font-weight: bold;")
+        self.wpa2_status.setMinimumWidth(80)
 
-        header.addWidget(title)
-        header.addStretch()
+        header.addWidget(self.wpa2_dict_label)
+        header.addWidget(self.wpa2_dict_input)
+        header.addSpacing(20)
         header.addWidget(self.wpa2_iface_label)
         header.addWidget(self.wpa2_iface_combo)
-        header.addSpacing(16)
+        header.addSpacing(20)
         header.addWidget(self.wpa2_status)
         layout.addLayout(header)
 
@@ -1006,6 +1018,7 @@ class WireTrap(QMainWindow):
             self.log_wpa2(f"Canal fijado en {self.selected_ap.channel}")
 
         self.wpa2_engine = WPA2Crypto(self.wpa2_iface_combo.currentText())
+        self.wpa2_engine.wordlist = self.wpa2_dict_input.text()
         self.wpa2_engine.on_log = lambda m: self.bridge.log_message.emit(m)
         self.wpa2_engine.on_success = lambda f: self.bridge.pmkid_success.emit(f)
         self.wpa2_engine.on_error = lambda e: self.bridge.pmkid_error.emit(e)
@@ -1026,8 +1039,11 @@ class WireTrap(QMainWindow):
         self.btn_wpa2_stop.setEnabled(False)
 
     def _on_pmkid_success(self, file_path):
-        self.log_wpa2(f"🏆 ¡Hash listo para crackear en: {file_path}")
-        self._stop_wpa2_attack()
+        self.log_wpa2(f"🏆 ¡Hash procesado con éxito!")
+        # Stop attack UI triggers since it's going into crack mode
+        self.wpa2_status.setText("● CRACKEANDO")
+        self.wpa2_status.setStyleSheet("color: #ffaa00; font-weight: bold;")
+        self.btn_wpa2_stop.setEnabled(False)
 
     def _on_pmkid_error(self, error):
         self.log_wpa2(f"❌ Error crítico: {error}")
