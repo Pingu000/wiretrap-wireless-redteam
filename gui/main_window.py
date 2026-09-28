@@ -1007,7 +1007,7 @@ class WireTrap(QMainWindow):
         layout.addWidget(splitter, 1)  # Stretch factor 1 to push everything up and consume space
 
     def _on_wpa2_scan_clicked(self):
-        if self.scanner and self.scanner.running:
+        if self.scanner and self.scanner.scanning:
             self.scanner.stop()
             self.btn_wpa2_scan.setText("▶ ESCANEAR REDES")
             self.btn_wpa2_scan.setStyleSheet("background-color: #00aa44; color: black; padding: 4px 10px;")
@@ -1037,8 +1037,8 @@ class WireTrap(QMainWindow):
         row = self.wpa2_ap_table.currentRow()
         if row < 0 or not self.scanner: return
         bssid = self.wpa2_ap_table.item(row, 1).text()
-        if bssid in self.scanner.access_points:
-            self.selected_ap = self.scanner.access_points[bssid]
+        if bssid in self.scanner.aps:
+            self.selected_ap = self.scanner.aps[bssid]
             self.log_wpa2(f"AP seleccionado para PMKID: {self.selected_ap.ssid} ({bssid})")
 
     def _start_wpa2_attack(self):
