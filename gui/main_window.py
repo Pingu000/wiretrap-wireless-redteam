@@ -928,6 +928,11 @@ class WireTrap(QMainWindow):
         self.wpa2_iface_label.setFont(QFont("Monospace", 10))
         self.wpa2_iface_combo = QComboBox()
         self.wpa2_iface_combo.setMinimumWidth(150)
+        
+        self.btn_wpa2_scan = QPushButton("▶ ESCANEAR REDES")
+        self.btn_wpa2_scan.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.btn_wpa2_scan.setStyleSheet("background-color: #00aa44; color: black; padding: 4px 10px;")
+        self.btn_wpa2_scan.clicked.connect(self._on_wpa2_scan_clicked)
 
         self.wpa2_status = QLabel("● IDLE")
         self.wpa2_status.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
@@ -939,6 +944,8 @@ class WireTrap(QMainWindow):
         header.addSpacing(20)
         header.addWidget(self.wpa2_iface_label)
         header.addWidget(self.wpa2_iface_combo)
+        header.addSpacing(10)
+        header.addWidget(self.btn_wpa2_scan)
         header.addSpacing(20)
         header.addWidget(self.wpa2_status)
         layout.addLayout(header)
@@ -998,6 +1005,33 @@ class WireTrap(QMainWindow):
         splitter.addWidget(log_group)
         splitter.setSizes([800, 600])
         layout.addWidget(splitter, 1)  # Stretch factor 1 to push everything up and consume space
+
+    def _on_wpa2_scan_clicked(self):
+        if self.scanner and self.scanner.running:
+            self.scanner.stop()
+            self.btn_wpa2_scan.setText("▶ ESCANEAR REDES")
+            self.btn_wpa2_scan.setStyleSheet("background-color: #00aa44; color: black; padding: 4px 10px;")
+            self.wpa2_status.setText("● DETENIDO")
+            self.wpa2_status.setStyleSheet("color: gray; font-weight: bold;")
+        else:
+            iface = self.wpa2_iface_combo.currentText()
+            if not iface:
+                QMessageBox.warning(self, "Error", "Selecciona una interfaz Alfa Monitor.")
+                return
+            self.scanner = Scanner(iface)
+            self.scanner.on_ap_found = lambda ap: self.bridge.ap_found.emit(ap)
+            self.scanner.on_client_found = lambda c: self.bridge.client_found.emit(c)
+            self.scanner.on_log = lambda m: self.bridge.log_message.emit(m)
+            self.scanner.start()
+
+            self.btn_wpa2_scan.setText("🛑 DETENER ESCANEO")
+            self.btn_wpa2_scan.setStyleSheet("background-color: #aa0000; color: white; padding: 4px 10px;")
+            
+            self.wpa2_status.setText("● BUSCANDO REDES")
+            self.wpa2_status.setStyleSheet("color: #00ff88; font-weight: bold;")
+            
+            self.wpa2_ap_table.setRowCount(0)
+            self.selected_ap = None
 
     def _on_wpa2_ap_selected(self):
         row = self.wpa2_ap_table.currentRow()
