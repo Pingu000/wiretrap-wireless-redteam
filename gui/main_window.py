@@ -528,11 +528,15 @@ class WireTrap(QMainWindow):
         self.iface_combo.addItems(interfaces)
         self.iface2_combo.addItems(interfaces)
         self.out_combo.addItems(interfaces)
+        if hasattr(self, 'wpa2_iface_combo'):
+            self.wpa2_iface_combo.addItems(interfaces)
 
         # Preseleccionar interfaces comunes
         for i, iface in enumerate(interfaces):
             if "wlan0" in iface:
                 self.iface_combo.setCurrentIndex(i)
+                if hasattr(self, 'wpa2_iface_combo'):
+                    self.wpa2_iface_combo.setCurrentIndex(i)
             if "wlan1" in iface:
                 self.iface2_combo.setCurrentIndex(i)
             if "eth0" in iface:
@@ -993,7 +997,7 @@ class WireTrap(QMainWindow):
 
         splitter.addWidget(log_group)
         splitter.setSizes([800, 600])
-        layout.addWidget(splitter)
+        layout.addWidget(splitter, 1)  # Stretch factor 1 to push everything up and consume space
 
     def _on_wpa2_ap_selected(self):
         row = self.wpa2_ap_table.currentRow()
