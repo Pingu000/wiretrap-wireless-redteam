@@ -1054,7 +1054,7 @@ class WireTrap(QMainWindow):
         target_name = "la red entera (Broadcast)"
         
         if ap and len(ap.clients) > 0:
-            client_mac = list(ap.clients)[0].mac
+            client_mac = list(ap.clients)[0]
             target_name = f"al cliente {client_mac}"
             
         self.log_wpa2(f"\\n[💥] RÁFAGA HÍBRIDA: Expulsando a {target_name} de {self.selected_ap.bssid} para forzar handshakes...")
