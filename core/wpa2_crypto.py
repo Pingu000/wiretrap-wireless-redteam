@@ -55,21 +55,16 @@ class WPA2Crypto:
         with open(filter_file, "w") as f:
             f.write(target_bssid_clean + "\n")
 
+        # Opciones compatibles con hcxdumptool 7.1.x para hacerlo verdaderamente silencioso
         cmd = [
             "hcxdumptool",
             "-i", self.interface,
             "-w", self.output_pcap,
-            "--silent"
+            "--rds=1",                     # Enable real time display format (1) to show APs/CLIENTs so we can parse output
+            "--associationmax=0",          # Disable PMKID association attacks automatically
+            "--m2max=0",                   # Reject acting as rogue AP for clients
+            "--disable_disassociation"     # Disable disassociation frames 
         ]
-        
-        # Opciones base transparentes
-        if os.path.exists(filter_file):
-            cmd = [
-                "hcxdumptool",
-                "-i", self.interface,
-                "-w", self.output_pcap,
-                "--silent"
-            ]
 
         self._log(f"[*] Lanzando hcxdumptool contra BSSID: {target_bssid}")
         
