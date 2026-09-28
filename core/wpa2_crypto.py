@@ -92,6 +92,9 @@ class WPA2Crypto:
                 if not self.running:
                     break
 
+        except FileNotFoundError:
+            if self.running and self.on_error:
+                self.on_error("Error: 'hcxdumptool' no está instalado. Ejecuta: sudo apt install hcxdumptool")
         except Exception as e:
             if self.running and self.on_error:
                 self.on_error(str(e))
@@ -148,6 +151,9 @@ class WPA2Crypto:
             else:
                  if self.on_error:
                     self.on_error("Fallo Criptográfico: El PCAP capturado no contenía PMKIDs ni Handshakes válidos.")
+        except FileNotFoundError:
+            if self.on_error:
+                self.on_error("Error: 'hcxpcapngtool' no encontrado. Instala el paquete hcxtools: sudo apt install hcxtools")
         except Exception as e:
             if self.on_error:
                 self.on_error(f"Error procesando herramienta de hashes: {e}")

@@ -648,17 +648,21 @@ class WireTrap(QMainWindow):
             self._add_client_row(client)
 
         # Actualizar contador de clientes en la tabla de APs
-        for row in range(self.ap_table.rowCount()):
-            bssid_item = self.ap_table.item(row, 1)
-            if bssid_item and bssid_item.text() == client.bssid:
-                ap = self.scanner.aps.get(client.bssid)
-                if ap:
-                    count_item = QTableWidgetItem(str(len(ap.clients)))
-                    count_item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignCenter
-                    )
-                    self.ap_table.setItem(row, 5, count_item)
-                break
+        def _update_count(table):
+            if not getattr(self, table, None): return
+            t = getattr(self, table)
+            for row in range(t.rowCount()):
+                bssid_item = t.item(row, 1)
+                if bssid_item and bssid_item.text() == client.bssid:
+                    ap = self.scanner.aps.get(client.bssid)
+                    if ap:
+                        count_item = QTableWidgetItem(str(len(ap.clients)))
+                        count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        t.setItem(row, 5, count_item)
+                    break
+                    
+        _update_count('ap_table')
+        _update_count('wpa2_ap_table')
 
     def _add_client_row(self, client: Client):
         row = self.client_table.rowCount()
