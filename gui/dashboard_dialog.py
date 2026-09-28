@@ -50,10 +50,14 @@ class DashboardDialog(QDialog):
         table = QTableWidget()
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        # Opcional: hacer la columna de datos un poco mas ancha
-        if "Dominio/URL" in headers:
-            table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        
+        header = table.horizontalHeader()
+        for i, h in enumerate(headers):
+            if h in ["Hora", "MAC/IP", "MAC", "Tipo", "IP Destino"]:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+            else:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
+
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
