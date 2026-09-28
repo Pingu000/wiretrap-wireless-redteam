@@ -59,10 +59,17 @@ class WPA2Crypto:
             "hcxdumptool",
             "-i", self.interface,
             "-w", self.output_pcap,
-            "--filterlist_ap=" + filter_file,
-            "--filtermode=2", # 2 = Only allow MACs in list
             "--enable_status=15" # Verbose status output
         ]
+        
+        # Eliminar filtros restrictivos que hacen crashear versiones nuevas de hcx a menos que se use el flag nuevo bssid
+        if os.path.exists(filter_file):
+            cmd = [
+                "hcxdumptool",
+                "-i", self.interface,
+                "-w", self.output_pcap,
+                "--enable_status=15"
+            ]
 
         self._log(f"[*] Lanzando hcxdumptool contra BSSID: {target_bssid}")
         
@@ -89,6 +96,8 @@ class WPA2Crypto:
                     elif "tx=" in line and "rx=" in line:
                          # Es un status line, lo ignoramos para no spamear
                          continue
+                    else:
+                         self._log(f"[HCX] {line}")
                 if not self.running:
                     break
 
