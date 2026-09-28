@@ -1,7 +1,7 @@
 import sys
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QHeaderView, QPushButton, QLabel, QTabWidget, QWidget
+    QHeaderView, QPushButton, QLabel, QTabWidget, QWidget, QTextEdit
 )
 from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QFont, QColor
@@ -57,7 +57,43 @@ class DashboardDialog(QDialog):
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         table.setAlternatingRowColors(True)
+        table.cellDoubleClicked.connect(lambda row, col: self._show_detail(table, row, col))
         return table
+
+    def _show_detail(self, table, row, col):
+        item = table.item(row, col)
+        if not item: return
+
+        detail_text = item.text()
+        if not detail_text.strip(): return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Inspeccionar Registro")
+        dlg.setMinimumSize(700, 400)
+        
+        # Heredar y adaptar el estilo para el popup
+        dlg.setStyleSheet(self.styleSheet() + """
+            QTextEdit { background: #051405; color: #00ff88; font-family: Monospace; font-size: 11pt; border: 1px solid #333333; padding: 10px; }
+        """)
+
+        layout = QVBoxLayout(dlg)
+
+        header_item = table.horizontalHeaderItem(col)
+        header_text = header_item.text() if header_item else "Detalle"
+        title = QLabel(f"Información Completa - Columna: {header_text}")
+        title.setStyleSheet("font-size: 12pt; color: #ffaa00; margin-bottom: 5px;")
+        layout.addWidget(title)
+
+        text_edit = QTextEdit()
+        text_edit.setPlainText(detail_text)
+        text_edit.setReadOnly(True)
+        layout.addWidget(text_edit)
+
+        close_btn = QPushButton("Cerrar")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        dlg.exec()
 
     @pyqtSlot(object)
     def on_data_captured(self, data):
@@ -79,7 +115,7 @@ class DashboardDialog(QDialog):
             extra_info = data.value if data.data_type != "DNS" else ""
             
             self.dns_table.setItem(row, 3, QTableWidgetItem(main_info))
-            self.dns_table.setItem(row, 4, QTableWidgetItem(extra_info[:150])) 
+            self.dns_table.setItem(row, 4, QTableWidgetItem(extra_info)) # No truncamos a 150 char, que lo vean entero en el popup
             
             # Auto scroll
             self.dns_table.scrollToBottom()
