@@ -17,6 +17,7 @@ from PyQt6.QtGui import QColor, QFont
 from core.scanner import Scanner, AccessPoint, Client
 from core.deauth import Deauther
 from core.evil_twin import EvilTwin
+from core.wpa2_crypto import WPA2Crypto
 from core.decision_engine import DecisionEngine, AttackTechnique
 from gui.dashboard_dialog import DashboardDialog
 from post_exploitation.sniffer import WireTrapSniffer
@@ -31,6 +32,8 @@ class SignalBridge(QObject):
     attack_stopped   = pyqtSignal()
     et_client_detail = pyqtSignal(str, str, str, str)  # mac, ip, hostname, hora
     data_captured    = pyqtSignal(object)
+    pmkid_success    = pyqtSignal(str)
+    pmkid_error      = pyqtSignal(str)
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -54,6 +57,7 @@ class WireTrap(QMainWindow):
         self.deauther = None
         self.evil_twin = None
         self.sniffer  = None
+        self.wpa2_engine = None
         self.engine   = DecisionEngine()
         
         self.dashboards = []
@@ -67,6 +71,8 @@ class WireTrap(QMainWindow):
         self.bridge.attack_stopped.connect(self._on_attack_stopped)
         self.bridge.et_client_detail.connect(self._on_et_client_detail)
         self.bridge.data_captured.connect(self._on_data_captured)
+        self.bridge.pmkid_success.connect(self._on_pmkid_success)
+        self.bridge.pmkid_error.connect(self._on_pmkid_error)
 
         # Timer para refrescar señal y contadores de la tabla de APs
         # cada 2 s (el scanner actualiza los objetos internos pero no
@@ -98,6 +104,10 @@ class WireTrap(QMainWindow):
         self._setup_deauth_ui(self.page_deauth)
         self.stack.addWidget(self.page_deauth)
 
+        self.page_wpa2 = QWidget()
+        self._setup_wpa2_ui(self.page_wpa2)
+        self.stack.addWidget(self.page_wpa2)
+
         self.stack.setCurrentIndex(0)
 
     def _setup_launcher_ui(self, parent_widget):
@@ -126,11 +136,12 @@ class WireTrap(QMainWindow):
         btn_deauth_et.setStyleSheet("background-color: #331111; border: 2px solid #e94560; color: white;")
         btn_deauth_et.clicked.connect(lambda: self.stack.setCurrentIndex(1))
 
-        btn_pmkid = QPushButton("🔒 Ataque PMKID (Clientless) [Próximamente]")
+        btn_pmkid = QPushButton("🔒 Criptografía WPA2 (PMKID/Handshakes)")
         btn_pmkid.setFixedHeight(60)
         btn_pmkid.setFixedWidth(400)
-        btn_pmkid.setFont(QFont("Monospace", 12))
-        btn_pmkid.setEnabled(False)
+        btn_pmkid.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        btn_pmkid.setStyleSheet("background-color: #113311; border: 2px solid #00aa44; color: white;")
+        btn_pmkid.clicked.connect(lambda: self.stack.setCurrentIndex(2))
 
         btn_captive = QPushButton("🎣 Portal Cautivo [Próximamente]")
         btn_captive.setFixedHeight(60)
@@ -589,9 +600,15 @@ class WireTrap(QMainWindow):
     # ── Callbacks del scanner (desde threads) ─────────────────
 
     def _on_ap_found(self, ap: AccessPoint):
-        """Añade un AP a la tabla — ejecutado en el hilo de la GUI"""
-        row = self.ap_table.rowCount()
-        self.ap_table.insertRow(row)
+        """Añade un AP a las tablas — ejecutado en el hilo de la GUI"""
+        self._insert_ap_into_table(self.ap_table, ap)
+        if hasattr(self, 'wpa2_ap_table'):
+            self._insert_ap_into_table(self.wpa2_ap_table, ap)
+            
+    def _insert_ap_into_table(self, table, ap: AccessPoint):
+        if not table: return
+        row = table.rowCount()
+        table.insertRow(row)
 
         values = [
             ap.ssid,
@@ -606,7 +623,6 @@ class WireTrap(QMainWindow):
             item = QTableWidgetItem(val)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            # Color por seguridad
             if col == 3:
                 colors = {
                     "OPEN":     "#ff4444",
@@ -619,7 +635,7 @@ class WireTrap(QMainWindow):
                 color = colors.get(val, "#e0e0e0")
                 item.setForeground(QColor(color))
 
-            self.ap_table.setItem(row, col, item)
+            table.setItem(row, col, item)
 
     def _on_client_found(self, client: Client):
         """Añade un cliente a la tabla si pertenece al AP seleccionado"""
@@ -658,19 +674,25 @@ class WireTrap(QMainWindow):
         """Refresca señal y contadores en la tabla de APs cada 2 s."""
         if not self.scanner:
             return
-        for row in range(self.ap_table.rowCount()):
-            bssid_item = self.ap_table.item(row, 1)
-            if not bssid_item:
-                continue
-            ap = self.scanner.aps.get(bssid_item.text())
-            if not ap:
-                continue
-            signal_item = self.ap_table.item(row, 4)
-            if signal_item:
-                signal_item.setText(f"{ap.signal} dBm")
-            count_item = self.ap_table.item(row, 5)
-            if count_item:
-                count_item.setText(str(len(ap.clients)))
+
+        def _update_table(table):
+            for row in range(table.rowCount()):
+                bssid_item = table.item(row, 1)
+                if not bssid_item:
+                    continue
+                ap = self.scanner.aps.get(bssid_item.text())
+                if not ap:
+                    continue
+                signal_item = table.item(row, 4)
+                if signal_item:
+                    signal_item.setText(f"{ap.signal} dBm")
+                count_item = table.item(row, 5)
+                if count_item:
+                    count_item.setText(str(len(ap.clients)))
+
+        _update_table(self.ap_table)
+        if hasattr(self, 'wpa2_ap_table'):
+            _update_table(self.wpa2_ap_table)
 
     def _on_client_joined(self, info: str):
         import re
@@ -871,6 +893,152 @@ class WireTrap(QMainWindow):
         )
         self.btn_stop.setEnabled(True)
         self.btn_attack.setEnabled(False)
+
+    # ── MÓDULO WPA2 CRYPTO ──────────────────────────────────────
+
+    def _setup_wpa2_ui(self, parent_widget):
+        layout = QVBoxLayout(parent_widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        header = QHBoxLayout()
+        self.btn_back_wpa2 = QPushButton("⬅ Volver al Menú")
+        self.btn_back_wpa2.setFixedWidth(150)
+        self.btn_back_wpa2.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.btn_back_wpa2.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        header.addWidget(self.btn_back_wpa2)
+        header.addSpacing(20)
+
+        title = QLabel("🔒 WireTrap: Ataques WPA2 (PMKID & Handshakes)")
+        title.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        
+        self.wpa2_iface_label = QLabel("Interfaz Monitor (Alfa):")
+        self.wpa2_iface_combo = QComboBox()
+        self.wpa2_iface_combo.setFixedWidth(120)
+
+        self.wpa2_status = QLabel("● IDLE")
+        self.wpa2_status.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.wpa2_status.setStyleSheet("color: gray; font-weight: bold;")
+
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(self.wpa2_iface_label)
+        header.addWidget(self.wpa2_iface_combo)
+        header.addSpacing(16)
+        header.addWidget(self.wpa2_status)
+        layout.addLayout(header)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color: #444;")
+        layout.addWidget(line)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        table_font = QFont("Monospace", 11)
+        header_font = QFont("Monospace", 11, QFont.Weight.Bold)
+
+        ap_group = QGroupBox("OBJETIVOS (APs)")
+        ap_group.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        ap_layout = QVBoxLayout(ap_group)
+        self.wpa2_ap_table = QTableWidget()
+        self.wpa2_ap_table.setColumnCount(6)
+        self.wpa2_ap_table.setHorizontalHeaderLabels(["SSID", "BSSID", "Canal", "Seguridad", "Señal", "Clientes"])
+        self.wpa2_ap_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.wpa2_ap_table.horizontalHeader().setFont(header_font)
+        self.wpa2_ap_table.horizontalHeader().setMinimumHeight(34)
+        self.wpa2_ap_table.verticalHeader().setVisible(False)
+        self.wpa2_ap_table.setFont(table_font)
+        self.wpa2_ap_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.wpa2_ap_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.wpa2_ap_table.setAlternatingRowColors(True)
+        self.wpa2_ap_table.itemClicked.connect(self._on_wpa2_ap_selected)
+        ap_layout.addWidget(self.wpa2_ap_table)
+        splitter.addWidget(ap_group)
+
+        log_group = QGroupBox("HCXDUMPTOOL LIVE LOGS")
+        log_group.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        log_layout = QVBoxLayout(log_group)
+        self.wpa2_log_text = QTextEdit()
+        self.wpa2_log_text.setReadOnly(True)
+        self.wpa2_log_text.setFont(table_font)
+        self.wpa2_log_text.setStyleSheet("background: #000; color: #00ff00;")
+        log_layout.addWidget(self.wpa2_log_text)
+        
+        btn_layout = QHBoxLayout()
+        self.btn_wpa2_start = QPushButton("▶ CAPTURAR PMKID")
+        self.btn_wpa2_start.setFont(header_font)
+        self.btn_wpa2_start.setStyleSheet("background-color: #00aa44; color: black; padding: 10px;")
+        self.btn_wpa2_start.clicked.connect(self._start_wpa2_attack)
+        
+        self.btn_wpa2_stop = QPushButton("🛑 DETENER CAZA")
+        self.btn_wpa2_stop.setFont(header_font)
+        self.btn_wpa2_stop.setStyleSheet("background-color: #aa0000; color: white; padding: 10px;")
+        self.btn_wpa2_stop.setEnabled(False)
+        self.btn_wpa2_stop.clicked.connect(self._stop_wpa2_attack)
+        
+        btn_layout.addWidget(self.btn_wpa2_start)
+        btn_layout.addWidget(self.btn_wpa2_stop)
+        log_layout.addLayout(btn_layout)
+
+        splitter.addWidget(log_group)
+        splitter.setSizes([800, 600])
+        layout.addWidget(splitter)
+
+    def _on_wpa2_ap_selected(self):
+        row = self.wpa2_ap_table.currentRow()
+        if row < 0 or not self.scanner: return
+        bssid = self.wpa2_ap_table.item(row, 1).text()
+        if bssid in self.scanner.access_points:
+            self.selected_ap = self.scanner.access_points[bssid]
+            self.log_wpa2(f"AP seleccionado para PMKID: {self.selected_ap.ssid} ({bssid})")
+
+    def _start_wpa2_attack(self):
+        if not self.selected_ap:
+            QMessageBox.warning(self, "Error", "Selecciona una red de la tabla.")
+            return
+            
+        if self.scanner:
+            self.scanner.stop()
+            
+        if self.selected_ap.channel:
+            import subprocess
+            iface_mon = self.wpa2_iface_combo.currentText()
+            subprocess.run(["iw", "dev", iface_mon, "set", "channel", str(self.selected_ap.channel)], capture_output=True)
+            self.log_wpa2(f"Canal fijado en {self.selected_ap.channel}")
+
+        self.wpa2_engine = WPA2Crypto(self.wpa2_iface_combo.currentText())
+        self.wpa2_engine.on_log = lambda m: self.bridge.log_message.emit(m)
+        self.wpa2_engine.on_success = lambda f: self.bridge.pmkid_success.emit(f)
+        self.wpa2_engine.on_error = lambda e: self.bridge.pmkid_error.emit(e)
+        self.wpa2_engine.on_stopped = self.bridge.attack_stopped.emit
+        
+        self.wpa2_engine.start_pmkid_attack(self.selected_ap.bssid)
+        self.wpa2_status.setText("● ATACANDO")
+        self.wpa2_status.setStyleSheet("color: #e94560; font-weight: bold;")
+        self.btn_wpa2_start.setEnabled(False)
+        self.btn_wpa2_stop.setEnabled(True)
+
+    def _stop_wpa2_attack(self):
+        if self.wpa2_engine:
+            self.wpa2_engine.stop()
+        self.wpa2_status.setText("● IDLE")
+        self.wpa2_status.setStyleSheet("color: gray; font-weight: bold;")
+        self.btn_wpa2_start.setEnabled(True)
+        self.btn_wpa2_stop.setEnabled(False)
+
+    def _on_pmkid_success(self, file_path):
+        self.log_wpa2(f"🏆 ¡Hash listo para crackear en: {file_path}")
+        self._stop_wpa2_attack()
+
+    def _on_pmkid_error(self, error):
+        self.log_wpa2(f"❌ Error crítico: {error}")
+        self._stop_wpa2_attack()
+
+    def log_wpa2(self, msg):
+        import datetime
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.wpa2_log_text.append(f"[{ts}] {msg}")
+
+    # ── MÓDULOS DEL ESCÁNER ───────────────────────────────────
 
     def _on_stop_clicked(self):
         if self.deauther:
