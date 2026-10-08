@@ -143,6 +143,7 @@ log-dhcp
     def _setup_interface(self, channel):
         """Configura la interfaz y la IP del gateway"""
         cmds = [
+            f"nmcli dev set {self.ap_iface} managed no",
             f"ip link set {self.ap_iface} down",
             f"iw dev {self.ap_iface} set type __ap",
             f"ip link set {self.ap_iface} up",
@@ -248,7 +249,8 @@ log-dhcp
                 stderr=subprocess.PIPE
             )
 
-            time.sleep(1)
+            # Esperar a que el driver nl80211 establezca la interfaz
+            time.sleep(2)
 
             # hostapd puede morir al instante si rechaza la config
             # (p.ej. canal/hw_mode incompatibles) sin que Popen lo
