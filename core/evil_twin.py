@@ -147,8 +147,6 @@ log-dhcp
             f"ip link set {self.ap_iface} down",
             f"iw dev {self.ap_iface} set type __ap",
             f"ip link set {self.ap_iface} up",
-            f"ip addr flush dev {self.ap_iface}",
-            f"ip addr add {self.gateway_ip}/24 dev {self.ap_iface}",
         ]
         for cmd in cmds:
             subprocess.run(cmd.split(), capture_output=True)
@@ -267,6 +265,13 @@ log-dhcp
                         f"hostapd no pudo arrancar: {stderr.strip()}"
                     )
                 return
+
+            # Asignar finalmente la IP de Gateway al Evil Twin.
+            # Se hace DESPUÉS de hostapd y del spoof_bssid porque si no,
+            # Linux o nl80211 borran la IP al hacer down/up de la interfaz, 
+            # hundiendo a dnsmasq.
+            subprocess.run(["ip", "addr", "flush", "dev", self.ap_iface], capture_output=True)
+            subprocess.run(["ip", "addr", "add", f"{self.gateway_ip}/24", "dev", self.ap_iface], capture_output=True)
 
             # Lanzar dnsmasq
             self._dnsmasq_proc = subprocess.Popen(
