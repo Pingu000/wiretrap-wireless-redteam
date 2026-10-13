@@ -132,8 +132,8 @@ class WPA2CrackModule:
             "hcxdumptool",
             "-i", self.interface,
             "-w", PMKID_PCAPNG,
-            "--filterlist_ap=" + FILTER_FILE,
-            "--filtermode=2",
+            "--filterlist_ap", FILTER_FILE,
+            "--filtermode", "2",
             "--rds=1",
         ]
 
