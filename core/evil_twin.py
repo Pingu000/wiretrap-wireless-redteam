@@ -140,16 +140,76 @@ log-dhcp
         with open(self.dnsmasq_conf, "w") as f:
             f.write(conf)
 
+    def _unmanage_interface(self):
+        """
+        Saca la interfaz AP del control de NetworkManager.
+        NM puede reclamar la interfaz y borrar la IP del gateway,
+        dejando a dnsmasq sin poder responder DHCP.
+        Se hace ANTES de cualquier configuración de red.
+        """
+        # Método 1: nmcli — la forma oficial
+        subprocess.run(
+            ["nmcli", "dev", "set", self.ap_iface, "managed", "no"],
+            capture_output=True
+        )
+        # Método 2: marcar la interfaz como unmanaged via udev path si nmcli falla
+        # (algunos setups con NM 1.x ignoran nmcli dev set sin reinicio)
+        subprocess.run(
+            ["nmcli", "device", "disconnect", self.ap_iface],
+            capture_output=True
+        )
+        time.sleep(0.5)
+
     def _setup_interface(self, channel):
-        """Configura la interfaz y la IP del gateway"""
+        """Configura la interfaz y la pone en modo AP"""
+        # Primero sacar de NM antes del down/up
+        self._unmanage_interface()
+
         cmds = [
-            f"nmcli dev set {self.ap_iface} managed no",
             f"ip link set {self.ap_iface} down",
             f"iw dev {self.ap_iface} set type __ap",
             f"ip link set {self.ap_iface} up",
         ]
         for cmd in cmds:
             subprocess.run(cmd.split(), capture_output=True)
+
+    def _assign_gateway_ip(self):
+        """
+        Asigna la IP del gateway a la interfaz AP y verifica que quedó asignada.
+        Reintenta hasta 3 veces si NetworkManager la borra.
+        Retorna True si la IP quedó asignada, False si falló.
+        """
+        for attempt in range(3):
+            # Limpiar IPs previas
+            subprocess.run(
+                ["ip", "addr", "flush", "dev", self.ap_iface],
+                capture_output=True
+            )
+            # Asignar gateway
+            subprocess.run(
+                ["ip", "addr", "add", f"{self.gateway_ip}/24", "dev", self.ap_iface],
+                capture_output=True
+            )
+            # Asegurar que la interfaz está UP después de la asignación
+            subprocess.run(
+                ["ip", "link", "set", self.ap_iface, "up"],
+                capture_output=True
+            )
+            time.sleep(0.3)
+
+            # Verificar que la IP está presente
+            res = subprocess.run(
+                ["ip", "addr", "show", "dev", self.ap_iface],
+                capture_output=True, text=True
+            )
+            if self.gateway_ip in res.stdout:
+                return True
+
+            # NM puede haber reclamado la interfaz — volver a suprimir
+            self._unmanage_interface()
+            time.sleep(0.5)
+
+        return False
 
     def _enable_forwarding(self, out_interface):
         """Activa IP forwarding y NAT para dar internet al cliente"""
@@ -232,12 +292,17 @@ log-dhcp
             self._write_hostapd_conf(ssid, channel, security,
                                      wpa_passphrase, target_bssid)
             self._write_dnsmasq_conf()
-            # _setup_interface hace down/up e iw set type __ap, lo que
-            # puede resetear la MAC en algunos drivers. El spoof de BSSID
-            # debe ir DESPUÉS para que la MAC quede fijada antes de hostapd.
+
+            # Sacar la interfaz de NM ANTES de cualquier configuración
+            self._unmanage_interface()
+
+            # Configurar modo AP (down → __ap → up)
             self._setup_interface(channel)
+
+            # El spoof de BSSID va DESPUÉS del setup (down/up puede resetear MAC)
             if target_bssid:
                 self._spoof_bssid(target_bssid)
+
             self._enable_forwarding(out_interface)
 
             # Lanzar hostapd
@@ -266,12 +331,20 @@ log-dhcp
                     )
                 return
 
-            # Asignar finalmente la IP de Gateway al Evil Twin.
-            # Se hace DESPUÉS de hostapd y del spoof_bssid porque si no,
-            # Linux o nl80211 borran la IP al hacer down/up de la interfaz, 
-            # hundiendo a dnsmasq.
-            subprocess.run(["ip", "addr", "flush", "dev", self.ap_iface], capture_output=True)
-            subprocess.run(["ip", "addr", "add", f"{self.gateway_ip}/24", "dev", self.ap_iface], capture_output=True)
+            # Asignar IP del gateway con verificación y reintentos.
+            # NM puede borrarla si no quedó bien suprimido — _assign_gateway_ip
+            # reintenta hasta 3 veces y fuerza unmanage entre intentos.
+            if not self._assign_gateway_ip():
+                # Último intento sin flush (NM puede haber asignado otra IP)
+                subprocess.run(
+                    ["ip", "addr", "add", f"{self.gateway_ip}/24", "dev", self.ap_iface],
+                    capture_output=True
+                )
+                subprocess.run(
+                    ["ip", "link", "set", self.ap_iface, "up"],
+                    capture_output=True
+                )
+                time.sleep(0.3)
 
             # Lanzar dnsmasq
             self._dnsmasq_proc = subprocess.Popen(
