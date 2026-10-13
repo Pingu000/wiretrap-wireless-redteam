@@ -456,3 +456,6 @@ class WPA2CrackModule:
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 result[tool] = False
         return result
+
+# Alias de compatibilidad con la GUI actual
+WPA2Crypto = WPA2CrackModule
