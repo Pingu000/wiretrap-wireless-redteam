@@ -34,6 +34,7 @@ class SignalBridge(QObject):
     data_captured    = pyqtSignal(object)
     pmkid_success    = pyqtSignal(str)
     pmkid_error      = pyqtSignal(str)
+    wpa2_log_message = pyqtSignal(str)
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -73,6 +74,7 @@ class WireTrap(QMainWindow):
         self.bridge.data_captured.connect(self._on_data_captured)
         self.bridge.pmkid_success.connect(self._on_pmkid_success)
         self.bridge.pmkid_error.connect(self._on_pmkid_error)
+        self.bridge.wpa2_log_message.connect(self.log_wpa2)
 
         # Timer para refrescar señal y contadores de la tabla de APs
         # cada 2 s (el scanner actualiza los objetos internos pero no
@@ -1107,10 +1109,11 @@ class WireTrap(QMainWindow):
 
         self.wpa2_engine = WPA2Crypto(self.wpa2_iface_combo.currentText())
         self.wpa2_engine.wordlist = self.wpa2_dict_input.text()
-        self.wpa2_engine.on_log = lambda m: self.bridge.log_message.emit(m)
-        self.wpa2_engine.on_success = lambda f: self.bridge.pmkid_success.emit(f)
-        self.wpa2_engine.on_error = lambda e: self.bridge.pmkid_error.emit(e)
-        self.wpa2_engine.on_stopped = self.bridge.attack_stopped.emit
+        self.wpa2_engine.on_log       = lambda m: self.bridge.wpa2_log_message.emit(m)
+        self.wpa2_engine.on_hash_ready = lambda f: self.bridge.wpa2_log_message.emit(f"[🔑] Hash listo para crackear: {f}")
+        self.wpa2_engine.on_success   = lambda f: self.bridge.pmkid_success.emit(f)
+        self.wpa2_engine.on_error     = lambda e: self.bridge.pmkid_error.emit(e)
+        self.wpa2_engine.on_stopped   = self.bridge.attack_stopped.emit
         
         self.wpa2_engine.start_pmkid_attack(self.selected_ap.bssid)
         self.wpa2_status.setText("● ATACANDO")
