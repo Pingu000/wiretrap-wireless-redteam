@@ -264,20 +264,20 @@ class WireTrap(QMainWindow):
         self.flood_speed_slider.setTickInterval(1)
         opts_layout.addWidget(self.flood_speed_slider)
 
-        self.flood_speed_value = QLabel("~500/s  (velocidad media)")
+        self.flood_speed_value = QLabel("200 pkt/s  (medio)")
         self.flood_speed_value.setFont(QFont("Monospace", 9))
         self.flood_speed_value.setStyleSheet("color: #aaaaaa;")
         opts_layout.addWidget(self.flood_speed_value)
 
         speed_map = {
-            1: (0.010, "~100/s  (lento)"),
-            2: (0.005, "~200/s  (bajo)"),
-            3: (0.002, "~500/s  (medio)"),
-            4: (0.001, "~1000/s (rápido)"),
-            5: (0.0,   "máximo  (sin límite)"),
+            1: "50 pkt/s   (lento)",
+            2: "100 pkt/s  (bajo)",
+            3: "200 pkt/s  (medio)",
+            4: "350 pkt/s  (rápido)",
+            5: "500 pkt/s  (máximo)",
         }
         self.flood_speed_slider.valueChanged.connect(
-            lambda v: self.flood_speed_value.setText(speed_map[v][1])
+            lambda v: self.flood_speed_value.setText(speed_map[v])
         )
 
         sep = QFrame()
@@ -439,40 +439,36 @@ class WireTrap(QMainWindow):
             QMessageBox.warning(self, "Error", "Selecciona una interfaz monitor.")
             return
 
-        speed_map = {
-            1: 0.010,
-            2: 0.005,
-            3: 0.002,
-            4: 0.001,
-            5: 0.0,
+        # Velocidad: el slider ahora mapea a paquetes/segundo para mdk4
+        pps_map = {
+            1: 50,
+            2: 100,
+            3: 200,
+            4: 350,
+            5: 500,
         }
-        interval = speed_map[self.flood_speed_slider.value()]
+        pps = pps_map[self.flood_speed_slider.value()]
         channel = int(self.flood_channel_combo.currentText())
         rotate = self.flood_chk_rotate.isChecked()
-        mix_real = self.flood_chk_real.isChecked()
-        real_ssids = getattr(self, "_flood_captured_ssids", [])
-
-        if mix_real and not real_ssids:
-            self._flood_log("[!] No hay SSIDs capturados — escanea primero o desmarca la opción.")
+        wpa2 = self.flood_chk_wpa2.isChecked()
 
         self.flooder = BeaconFlooder(iface)
-        self.flooder.announce_wpa2 = self.flood_chk_wpa2.isChecked()
         self.flooder.on_beacon_sent = lambda c: self.bridge.flood_beacon_sent.emit(c)
         self.flooder.on_stopped = lambda: self.bridge.flood_stopped.emit()
+        if hasattr(self.flooder, 'on_error'):
+            self.flooder.on_error = lambda msg: self._flood_log(f"[!] {msg}")
 
         self.flooder.start(
             channel=channel,
-            interval=interval,
+            pps=pps,
             rotate_channels=rotate,
-            mix_real_ssids=mix_real,
-            real_ssids=real_ssids
+            announce_wpa2=wpa2
         )
 
-        self._flood_log(f"Beacon Flood iniciado en {iface}")
-        self._flood_log(f"  Canal: {'rotando 1/6/11' if rotate else channel}")
-        self._flood_log(f"  Velocidad: {self.flood_speed_value.text().strip()}")
-        self._flood_log(f"  SSIDs reales mezclados: {'sí (' + str(len(real_ssids)) + ')' if mix_real else 'no'}")
-        self._flood_log(f"  WPA2 falso: {'sí' if self.flooder.announce_wpa2 else 'no'}")
+        self._flood_log(f"Beacon Flood iniciado en {iface} (backend: mdk4)")
+        self._flood_log(f"  Canal: {'rotando (hop)' if rotate else channel}")
+        self._flood_log(f"  Velocidad: {pps} paquetes/s")
+        self._flood_log(f"  WPA2 falso: {'sí' if wpa2 else 'no'}")
 
         self.flood_status_label.setText("● FLOODING")
         self.flood_status_label.setStyleSheet("color: #5588ff; font-weight: bold;")
