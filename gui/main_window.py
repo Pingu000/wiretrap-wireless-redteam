@@ -18,6 +18,7 @@ from core.scanner import Scanner, AccessPoint, Client
 from core.deauth import Deauther
 from core.evil_twin import EvilTwin
 from core.beacon_flood import BeaconFlooder
+from core.captive_portal import CaptivePortal
 from core.wpa2_crypto import WPA2Crypto
 from core.decision_engine import DecisionEngine, AttackTechnique
 from gui.dashboard_dialog import DashboardDialog
@@ -38,6 +39,10 @@ class SignalBridge(QObject):
     wpa2_log_message = pyqtSignal(str)
     flood_beacon_sent = pyqtSignal(int)
     flood_stopped    = pyqtSignal()
+    cp_log           = pyqtSignal(str)
+    cp_credential    = pyqtSignal(object)   # dict
+    cp_started       = pyqtSignal()
+    cp_stopped       = pyqtSignal()
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -63,6 +68,7 @@ class WireTrap(QMainWindow):
         self.sniffer  = None
         self.wpa2_engine = None
         self.flooder  = None
+        self.captive_portal = None
         self.engine   = DecisionEngine()
 
         self.dashboards = []
@@ -81,6 +87,10 @@ class WireTrap(QMainWindow):
         self.bridge.wpa2_log_message.connect(self.log_wpa2)
         self.bridge.flood_beacon_sent.connect(self._on_flood_beacon_sent)
         self.bridge.flood_stopped.connect(self._on_flood_stopped)
+        self.bridge.cp_log.connect(self._on_cp_log)
+        self.bridge.cp_credential.connect(self._on_cp_credential)
+        self.bridge.cp_started.connect(self._on_cp_started)
+        self.bridge.cp_stopped.connect(self._on_cp_stopped)
 
         # Timer para refrescar señal y contadores de la tabla de APs
         self._refresh_timer = QTimer(self)
@@ -117,6 +127,10 @@ class WireTrap(QMainWindow):
         self.page_flood = QWidget()
         self._setup_flood_ui(self.page_flood)
         self.stack.addWidget(self.page_flood)
+
+        self.page_captive = QWidget()
+        self._setup_captive_ui(self.page_captive)
+        self.stack.addWidget(self.page_captive)
 
         self.stack.setCurrentIndex(0)
 
@@ -160,11 +174,12 @@ class WireTrap(QMainWindow):
         btn_flood.setStyleSheet("background-color: #111133; border: 2px solid #5588ff; color: white;")
         btn_flood.clicked.connect(lambda: self.stack.setCurrentIndex(3))
 
-        btn_captive = QPushButton("🎣 Portal Cautivo [Próximamente]")
+        btn_captive = QPushButton("🎣 Captive Portal (Evil Twin Público)")
         btn_captive.setFixedHeight(60)
         btn_captive.setFixedWidth(400)
-        btn_captive.setFont(QFont("Monospace", 12))
-        btn_captive.setEnabled(False)
+        btn_captive.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        btn_captive.setStyleSheet("background-color: #1a1100; border: 2px solid #ff8800; color: white;")
+        btn_captive.clicked.connect(lambda: self.stack.setCurrentIndex(4))
 
         btn_dns = QPushButton("🌍 DNS Spoofing [Próximamente]")
         btn_dns.setFixedHeight(60)
@@ -179,6 +194,315 @@ class WireTrap(QMainWindow):
         grid.addWidget(btn_dns, alignment=Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(grid)
+
+    # ── Captive Portal UI ─────────────────────────────────────────
+
+    def _setup_captive_ui(self, parent_widget):
+        layout = QVBoxLayout(parent_widget)
+        layout.setSpacing(8)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # Header
+        header = QHBoxLayout()
+        btn_back = QPushButton("⬅ Volver al Menú")
+        btn_back.setFixedWidth(150)
+        btn_back.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        btn_back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        header.addWidget(btn_back)
+        header.addSpacing(20)
+
+        title = QLabel("🎣 WireTrap: Captive Portal — Evil Twin Público")
+        title.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
+        title.setStyleSheet("color: #ff8800;")
+        header.addWidget(title)
+        header.addStretch()
+
+        self.cp_iface_label = QLabel("Interfaz (managed):")
+        self.cp_iface_combo = QComboBox()
+        self.cp_iface_combo.setFixedWidth(140)
+        header.addWidget(self.cp_iface_label)
+        header.addWidget(self.cp_iface_combo)
+        header.addSpacing(16)
+
+        self.cp_status_label = QLabel("● IDLE")
+        self.cp_status_label.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.cp_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        header.addWidget(self.cp_status_label)
+
+        layout.addLayout(header)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color: #444;")
+        layout.addWidget(line)
+
+        center = QHBoxLayout()
+
+        # ── Panel izquierdo: configuración ───────────────────────
+        opts_group = QGroupBox("CONFIGURACIÓN DEL PORTAL")
+        opts_group.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        opts_group.setFixedWidth(360)
+        opts_layout = QVBoxLayout(opts_group)
+        opts_layout.setSpacing(14)
+
+        # SSID
+        ssid_row = QHBoxLayout()
+        ssid_label = QLabel("SSID del AP:")
+        ssid_label.setFont(QFont("Monospace", 10))
+        self.cp_ssid_input = QLineEdit("MallWiFi_FREE")
+        self.cp_ssid_input.setFont(QFont("Monospace", 10))
+        ssid_row.addWidget(ssid_label)
+        ssid_row.addWidget(self.cp_ssid_input)
+        opts_layout.addLayout(ssid_row)
+
+        # Canal
+        ch_row = QHBoxLayout()
+        ch_label = QLabel("Canal WiFi:")
+        ch_label.setFont(QFont("Monospace", 10))
+        self.cp_channel_combo = QComboBox()
+        self.cp_channel_combo.addItems([str(i) for i in range(1, 14)])
+        self.cp_channel_combo.setCurrentText("6")
+        self.cp_channel_combo.setFixedWidth(70)
+        ch_row.addWidget(ch_label)
+        ch_row.addStretch()
+        ch_row.addWidget(self.cp_channel_combo)
+        opts_layout.addLayout(ch_row)
+
+        # Plantilla de portal
+        tpl_label = QLabel("Plantilla de login:")
+        tpl_label.setFont(QFont("Monospace", 10))
+        opts_layout.addWidget(tpl_label)
+        self.cp_template_combo = QComboBox()
+        self.cp_template_combo.addItems(["google", "venue"])
+        self.cp_template_combo.setFont(QFont("Monospace", 10))
+        opts_layout.addWidget(self.cp_template_combo)
+
+        tpl_hint = QLabel(
+            "  google → página estilo Google\n"
+            "  venue  → portal WiFi genérico"
+        )
+        tpl_hint.setFont(QFont("Monospace", 8))
+        tpl_hint.setStyleSheet("color: #888888;")
+        opts_layout.addWidget(tpl_hint)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #333;")
+        opts_layout.addWidget(sep)
+
+        # Nombre del venue
+        venue_label = QLabel("Nombre del lugar (portal):")
+        venue_label.setFont(QFont("Monospace", 10))
+        opts_layout.addWidget(venue_label)
+        self.cp_venue_input = QLineEdit("Centro Comercial")
+        self.cp_venue_input.setFont(QFont("Monospace", 10))
+        opts_layout.addWidget(self.cp_venue_input)
+
+        opts_layout.addStretch()
+
+        # Info técnica
+        info = QLabel(
+            "Requiere:\n"
+            "  • hostapd\n"
+            "  • dnsmasq\n"
+            "  • python3-flask\n"
+            "  • Ejecutar como root"
+        )
+        info.setFont(QFont("Monospace", 8))
+        info.setStyleSheet("color: #666666; border: 1px solid #333; padding: 6px; border-radius: 4px;")
+        opts_layout.addWidget(info)
+
+        center.addWidget(opts_group)
+
+        # ── Panel central: credenciales capturadas ───────────────
+        right_layout = QVBoxLayout()
+
+        # Tabla de credenciales
+        creds_group = QGroupBox("CREDENCIALES CAPTURADAS")
+        creds_group.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        creds_layout = QVBoxLayout(creds_group)
+
+        self.cp_creds_table = QTableWidget()
+        self.cp_creds_table.setColumnCount(4)
+        self.cp_creds_table.setHorizontalHeaderLabels(
+            ["Hora", "IP Víctima", "Email / Usuario", "Contraseña"]
+        )
+        self.cp_creds_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.cp_creds_table.horizontalHeader().setStretchLastSection(True)
+        self.cp_creds_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.cp_creds_table.setFont(QFont("Monospace", 9))
+        self.cp_creds_table.setStyleSheet(
+            "background: #0d0d0d; color: #ff8800; "
+            "gridline-color: #333; selection-background-color: #331a00;"
+        )
+        creds_layout.addWidget(self.cp_creds_table)
+
+        # Exportar
+        export_row = QHBoxLayout()
+        self.cp_lbl_count = QLabel("0 credenciales capturadas")
+        self.cp_lbl_count.setFont(QFont("Monospace", 10))
+        self.cp_lbl_count.setStyleSheet("color: #ff8800;")
+        self.btn_cp_export = QPushButton("💾 Exportar JSON")
+        self.btn_cp_export.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.btn_cp_export.setEnabled(False)
+        self.btn_cp_export.clicked.connect(self._on_cp_export_clicked)
+        self.btn_cp_export.setStyleSheet(
+            "QPushButton { background: #1a0d00; border: 1px solid #ff8800; color: #ff8800; padding: 4px 12px; border-radius: 4px; }"
+            "QPushButton:hover { background: #ff8800; color: black; }"
+        )
+        export_row.addWidget(self.cp_lbl_count)
+        export_row.addStretch()
+        export_row.addWidget(self.btn_cp_export)
+        creds_layout.addLayout(export_row)
+
+        creds_group.setFixedHeight(250)
+        right_layout.addWidget(creds_group)
+
+        # Log
+        log_group = QGroupBox("LOG DEL ATAQUE")
+        log_group.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        log_inner = QVBoxLayout(log_group)
+        self.cp_log_text = QTextEdit()
+        self.cp_log_text.setReadOnly(True)
+        self.cp_log_text.setFont(QFont("Monospace", 9))
+        self.cp_log_text.setStyleSheet(
+            "background: #0d0d0d; color: #ff8800; border: 1px solid #333;"
+        )
+        self.cp_log_text.setPlaceholderText("Los eventos del portal aparecerán aquí...")
+        log_inner.addWidget(self.cp_log_text)
+        right_layout.addWidget(log_group)
+
+        center.addLayout(right_layout)
+        layout.addLayout(center, 1)
+
+        # Botones arranque / parada
+        btn_row = QHBoxLayout()
+        self.btn_cp_start = QPushButton("🎣  Iniciar Captive Portal")
+        self.btn_cp_start.setFixedHeight(44)
+        self.btn_cp_start.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        self.btn_cp_start.setStyleSheet(
+            "QPushButton { background: #1a0d00; border: 2px solid #ff8800; color: #ff8800; border-radius: 4px; }"
+            "QPushButton:hover { background: #ff8800; color: black; }"
+        )
+        self.btn_cp_start.clicked.connect(self._on_cp_start_clicked)
+
+        self.btn_cp_stop = QPushButton("■  Detener")
+        self.btn_cp_stop.setFixedHeight(44)
+        self.btn_cp_stop.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        self.btn_cp_stop.setEnabled(False)
+        self.btn_cp_stop.clicked.connect(self._on_cp_stop_clicked)
+
+        btn_row.addWidget(self.btn_cp_start)
+        btn_row.addWidget(self.btn_cp_stop)
+        layout.addLayout(btn_row)
+
+    # ── Captive Portal: callbacks y slots ─────────────────────────
+
+    def _cp_log(self, msg: str):
+        from datetime import datetime
+        ts = datetime.now().strftime("%H:%M:%S")
+        if "CREDENCIAL" in msg or "[!]" in msg:
+            self.cp_log_text.append(
+                f"<span style='color:#ff3333; font-weight:bold;'>[{ts}] {msg}</span>"
+            )
+        else:
+            self.cp_log_text.append(f"[{ts}] {msg}")
+
+    def _on_cp_log(self, msg: str):
+        self._cp_log(msg)
+
+    def _on_cp_credential(self, entry):
+        """Añade una fila a la tabla de credenciales."""
+        row = self.cp_creds_table.rowCount()
+        self.cp_creds_table.insertRow(row)
+        for col, val in enumerate([
+            entry.get("timestamp", ""),
+            entry.get("ip", ""),
+            entry.get("email", ""),
+            entry.get("password", ""),
+        ]):
+            item = QTableWidgetItem(val)
+            item.setForeground(QColor("#ff8800"))
+            self.cp_creds_table.setItem(row, col, item)
+
+        count = self.cp_creds_table.rowCount()
+        self.cp_lbl_count.setText(f"{count} credencial{'es' if count != 1 else ''} capturada{'s' if count != 1 else ''}")
+        self.btn_cp_export.setEnabled(True)
+
+    def _on_cp_started(self):
+        self.cp_status_label.setText("● ACTIVO")
+        self.cp_status_label.setStyleSheet("color: #ff8800; font-weight: bold;")
+        self.btn_cp_start.setEnabled(False)
+        self.btn_cp_stop.setEnabled(True)
+        self.cp_ssid_input.setEnabled(False)
+        self.cp_channel_combo.setEnabled(False)
+        self.cp_template_combo.setEnabled(False)
+        self.cp_venue_input.setEnabled(False)
+        self.cp_iface_combo.setEnabled(False)
+
+    def _on_cp_stopped(self):
+        self.cp_status_label.setText("● IDLE")
+        self.cp_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        self.btn_cp_start.setEnabled(True)
+        self.btn_cp_stop.setEnabled(False)
+        self.cp_ssid_input.setEnabled(True)
+        self.cp_channel_combo.setEnabled(True)
+        self.cp_template_combo.setEnabled(True)
+        self.cp_venue_input.setEnabled(True)
+        self.cp_iface_combo.setEnabled(True)
+        self._cp_log("Portal detenido.")
+
+    def _on_cp_start_clicked(self):
+        iface = self.cp_iface_combo.currentText()
+        if not iface:
+            QMessageBox.warning(self, "Error", "Selecciona una interfaz.")
+            return
+
+        ssid     = self.cp_ssid_input.text().strip() or "FreeWiFi"
+        channel  = int(self.cp_channel_combo.currentText())
+        template = self.cp_template_combo.currentText()
+        venue    = self.cp_venue_input.text().strip() or "Portal WiFi"
+
+        # Limpiar tabla de credenciales previa
+        self.cp_creds_table.setRowCount(0)
+        self.cp_lbl_count.setText("0 credenciales capturadas")
+        self.btn_cp_export.setEnabled(False)
+
+        self.captive_portal = CaptivePortal(iface)
+        self.captive_portal.on_log        = lambda m: self.bridge.cp_log.emit(m)
+        self.captive_portal.on_error      = lambda m: self.bridge.cp_log.emit(f"[!] ERROR: {m}")
+        self.captive_portal.on_credential = lambda e: self.bridge.cp_credential.emit(e)
+        self.captive_portal.on_started    = lambda: self.bridge.cp_started.emit()
+        self.captive_portal.on_stopped    = lambda: self.bridge.cp_stopped.emit()
+
+        import threading
+        t = threading.Thread(
+            target=self.captive_portal.start,
+            kwargs=dict(ssid=ssid, channel=channel, template=template, venue=venue),
+            daemon=True
+        )
+        t.start()
+
+    def _on_cp_stop_clicked(self):
+        if self.captive_portal:
+            import threading
+            threading.Thread(target=self.captive_portal.stop, daemon=True).start()
+
+    def _on_cp_export_clicked(self):
+        if not self.captive_portal:
+            return
+        from datetime import datetime
+        ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = f"/tmp/wiretrap_creds_{ts}.json"
+        out  = self.captive_portal.export_credentials(path)
+        QMessageBox.information(
+            self, "Exportado",
+            f"Credenciales guardadas en:\n{out}"
+        )
 
     def _setup_flood_ui(self, parent_widget):
         layout = QVBoxLayout(parent_widget)
@@ -885,6 +1209,8 @@ class WireTrap(QMainWindow):
         self.flood_iface_combo.addItems(interfaces)
         if hasattr(self, 'wpa2_iface_combo'):
             self.wpa2_iface_combo.addItems(interfaces)
+        if hasattr(self, 'cp_iface_combo'):
+            self.cp_iface_combo.addItems(interfaces)
 
         for i, iface in enumerate(interfaces):
             if "wlan0" in iface:
@@ -892,6 +1218,8 @@ class WireTrap(QMainWindow):
                 self.flood_iface_combo.setCurrentIndex(i)
                 if hasattr(self, 'wpa2_iface_combo'):
                     self.wpa2_iface_combo.setCurrentIndex(i)
+                if hasattr(self, 'cp_iface_combo'):
+                    self.cp_iface_combo.setCurrentIndex(i)
             if "wlan1" in iface:
                 self.iface2_combo.setCurrentIndex(i)
             if "eth0" in iface:
