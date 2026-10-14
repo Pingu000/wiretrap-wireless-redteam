@@ -12,10 +12,32 @@ from scapy.all import sendp, RadioTap
 from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11Elt
 
 
+# OUIs reales de routers domésticos (Cisco, TP-Link, Netgear, ASUS, Ubiquiti...)
+_REAL_OUIS = [
+    (0x00, 0x50, 0xF2),  # Microsoft / routers Cisco
+    (0xC8, 0x3A, 0x35),  # Tenda
+    (0x50, 0xC7, 0xBF),  # TP-Link
+    (0x14, 0xCC, 0x20),  # TP-Link
+    (0x18, 0xA6, 0xF7),  # NETGEAR
+    (0x2C, 0x30, 0x33),  # NETGEAR
+    (0x04, 0x92, 0x26),  # ASUS
+    (0x10, 0xBF, 0x48),  # ASUS
+    (0x80, 0x2A, 0xA8),  # Ubiquiti
+    (0xDC, 0x9F, 0xDB),  # Ubiquiti
+    (0x68, 0x72, 0x51),  # Huawei
+    (0xAC, 0x84, 0xC9),  # Huawei
+    (0x00, 0x1A, 0x11),  # Google (Nest/WiFi)
+    (0xF4, 0xF5, 0xDB),  # Google
+    (0xB0, 0x95, 0x8E),  # Apple AirPort
+    (0x70, 0x73, 0xCB),  # D-Link
+    (0xBC, 0xF6, 0x85),  # D-Link
+]
+
+
 def _random_mac():
-    """Genera una MAC aleatoria con bit unicast/locally-administered."""
-    mac = [random.randint(0, 255) for _ in range(6)]
-    mac[0] = (mac[0] & 0xFE) | 0x02  # locally administered, unicast
+    """Genera una MAC realista usando OUIs de fabricantes conocidos."""
+    oui = random.choice(_REAL_OUIS)
+    mac = list(oui) + [random.randint(0, 255) for _ in range(3)]
     return ":".join(f"{b:02x}" for b in mac)
 
 
