@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QTableWidget, QTableWidgetItem, QPushButton,
     QLabel, QComboBox, QHeaderView, QFrame, QSplitter,
     QTextEdit, QGroupBox, QMessageBox, QLineEdit,
-    QStackedWidget, QCheckBox, QSlider
+    QStackedWidget, QCheckBox, QSlider, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont
