@@ -9,3 +9,4 @@ venv/
 .DS_Store
 captured_*.txt
 *.pcap
+WireTrap_Context.md
