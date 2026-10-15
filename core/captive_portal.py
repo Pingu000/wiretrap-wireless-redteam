@@ -244,12 +244,35 @@ def clone_login_page(url: str, log_fn=None) -> str:
         except Exception:
             html_text = resp.text
         _log(f"[*] Descargado con requests ({len(html_text)} bytes). URL final: {final_url}")
+        # Detectar si el sitio bloquea recursos (CSS/JS con 403) → necesita Playwright
+        _needs_playwright = False
+        try:
+            from bs4 import BeautifulSoup as _BS4_check
+            _soup_check = _BS4_check(html_text, "html.parser")
+            for _link in _soup_check.find_all("link", rel=lambda v: v and "stylesheet" in v):
+                _href = _link.get("href", "")
+                if _href and not _href.startswith("data:"):
+                    from urllib.parse import urljoin as _urljoin_check
+                    _abs = _urljoin_check(final_url, _href)
+                    try:
+                        import requests as _req_check
+                        _r = _req_check.head(_abs, headers=headers, timeout=5, verify=False,
+                                             allow_redirects=True)
+                        if _r.status_code in (403, 401, 429, 503):
+                            _log(f"[*] CSS bloqueado ({_r.status_code}): activando Playwright")
+                            _needs_playwright = True
+                            break
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     except Exception as e:
         _log(f"[!] requests falló: {e}")
         html_text = ""
+        _needs_playwright = False
 
     # ── 2. Fallback: Playwright headless via Node.js (para sitios con JS) ─
-    if not html_text or len(html_text) < 500:
+    if not html_text or len(html_text) < 500 or _needs_playwright:
         _log("[*] Intentando con Playwright Node.js headless (puede tardar ~15s)...")
         try:
             import subprocess as _sp, tempfile as _tf, json as _json, shutil as _sh
@@ -261,8 +284,17 @@ def clone_login_page(url: str, log_fn=None) -> str:
             js_script = f"""
 const {{ chromium }} = require('playwright');
 (async () => {{
+    // Try to find system Chromium if playwright's own binary is missing
+    const {{ execSync }} = require('child_process');
+    let executablePath = undefined;
+    try {{
+        const which = execSync('which chromium-browser chromium google-chrome 2>/dev/null || true', {{encoding:'utf8'}}).trim();
+        const found = which.split('\n').filter(Boolean)[0];
+        if (found) executablePath = found;
+    }} catch(e) {{}}
     const browser = await chromium.launch({{
         headless: true,
+        executablePath: executablePath,
         args: ['--no-sandbox', '--disable-setuid-sandbox',
                '--disable-blink-features=AutomationControlled']
     }});
