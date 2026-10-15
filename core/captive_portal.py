@@ -305,7 +305,7 @@ def clone_login_page(url: str, log_fn=None) -> str:
     def inline_css_urls(css_text, base):
         """Reemplaza url(...) dentro de CSS con data-URIs."""
         def _repl(m):
-            raw = m.group(1).strip("'\" )
+            raw = m.group(1).strip(" '\"")
             if raw.startswith("data:"):
                 return m.group(0)
             d = to_data_uri(raw, base)
