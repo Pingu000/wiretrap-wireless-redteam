@@ -285,13 +285,11 @@ def clone_login_page(url: str, log_fn=None) -> str:
 const {{ chromium }} = require('playwright');
 (async () => {{
     // Try to find system Chromium if playwright's own binary is missing
-    const {{ execSync }} = require('child_process');
+    const fs = require('fs');
+    const candidates = ['/usr/bin/chromium', '/usr/bin/chromium-browser',
+                        '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable'];
     let executablePath = undefined;
-    try {{
-        const which = execSync('which chromium-browser chromium google-chrome 2>/dev/null || true', {{encoding:'utf8'}}).trim();
-        const found = which.split('\n').filter(Boolean)[0];
-        if (found) executablePath = found;
-    }} catch(e) {{}}
+    for (const c of candidates) {{ if (fs.existsSync(c)) {{ executablePath = c; break; }} }}
     const browser = await chromium.launch({{
         headless: true,
         executablePath: executablePath,
