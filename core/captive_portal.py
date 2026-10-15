@@ -191,45 +191,103 @@ def clone_login_page(url: str, log_fn=None) -> str:
         import requests
         from bs4 import BeautifulSoup
     except ImportError:
-        _log("[!] Faltan dependencias: pip install requests beautifulsoup4")
+        _log("[!] Faltan dependencias: pip3 install requests beautifulsoup4 --break-system-packages")
         return ""
+
+    import re as _re
 
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
+            "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
     }
 
-    session = requests.Session()
-    session.headers.update(headers)
-    session.verify = False  # portales WiFi tienen certs autofirmados
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    # ── 1. Descargar HTML principal ──────────────────────────────
-    _log(f"[*] Descargando página: {url}")
+    html_text = ""
+    final_url = url
+
+    # ── 1. Intentar con requests (headers reales + cookies de sesión) ─
+    _log(f"[*] Iniciando clonación de: {url}")
     try:
-        resp = session.get(url, timeout=15, allow_redirects=True)
+        session = requests.Session()
+        session.headers.update(headers)
+        session.verify = False
+        # Visitar la home primero para obtener cookies de sesión
+        from urllib.parse import urlparse as _up
+        parsed = _up(url)
+        home_url = f"{parsed.scheme}://{parsed.netloc}/"
+        try:
+            session.get(home_url, timeout=10, allow_redirects=True)
+        except Exception:
+            pass
+        _log(f"[*] Descargando página: {url}")
+        resp = session.get(url, timeout=20, allow_redirects=True)
         resp.raise_for_status()
         final_url = resp.url
+        encoding = resp.encoding or "utf-8"
+        try:
+            html_text = resp.content.decode(encoding, errors="replace")
+        except Exception:
+            html_text = resp.text
+        _log(f"[*] Descargado con requests ({len(html_text)} bytes). URL final: {final_url}")
     except Exception as e:
-        _log(f"[!] Error descargando {url}: {e}")
-        return ""
+        _log(f"[!] requests falló: {e}")
+        html_text = ""
 
-    encoding = resp.encoding or "utf-8"
-    try:
-        html_text = resp.content.decode(encoding, errors="replace")
-    except Exception:
-        html_text = resp.text
+    # ── 2. Fallback: Playwright headless (para sitios con JS pesado) ─
+    if not html_text or len(html_text) < 500:
+        _log("[*] Intentando con Playwright headless (puede tardar ~10s)...")
+        try:
+            from playwright.sync_api import sync_playwright
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-setuid-sandbox",
+                          "--disable-blink-features=AutomationControlled"]
+                )
+                ctx = browser.new_context(
+                    user_agent=headers["User-Agent"],
+                    locale="es-ES",
+                    viewport={"width": 1280, "height": 800},
+                    ignore_https_errors=True,
+                )
+                page = ctx.new_page()
+                page.goto(url, wait_until="networkidle", timeout=30000)
+                final_url = page.url
+                html_text = page.content()
+                browser.close()
+            _log(f"[*] Playwright OK ({len(html_text)} bytes). URL final: {final_url}")
+        except ImportError:
+            _log("[!] Playwright no disponible. Instala: pip3 install playwright --break-system-packages && playwright install chromium")
+            if not html_text:
+                return ""
+        except Exception as e2:
+            _log(f"[!] Playwright también falló: {e2}")
+            if not html_text:
+                return ""
 
     soup = BeautifulSoup(html_text, "html.parser")
-    _log(f"[*] Página descargada ({len(html_text)} bytes). Base URL: {final_url}")
 
-    # ── 2. Función auxiliar: descargar recurso → data URI ────────
+    # Sesión para descargar recursos (disponible incluso si usó Playwright)
+    _res_session = requests.Session()
+    _res_session.headers.update(headers)
+    _res_session.verify = False
+
+    # ── 3. Función auxiliar: descargar recurso → data URI ────────
     def _resource_to_data_uri(href, base_url):
         abs_url = urljoin(base_url, href)
         # Sólo recursos HTTP/HTTPS
@@ -237,7 +295,7 @@ def clone_login_page(url: str, log_fn=None) -> str:
         if scheme not in ("http", "https"):
             return None
         try:
-            r = session.get(abs_url, timeout=10, allow_redirects=True)
+            r = _res_session.get(abs_url, timeout=10, allow_redirects=True)
             if r.status_code != 200:
                 return None
             content_type = r.headers.get("Content-Type", "").split(";")[0].strip()
@@ -250,7 +308,7 @@ def clone_login_page(url: str, log_fn=None) -> str:
         except Exception:
             return None
 
-    # ── 3. Inlinar CSS externos ──────────────────────────────────
+    # ── 4. Inlinar CSS externos ──────────────────────────────────
     for tag in soup.find_all("link", rel=lambda v: v and "stylesheet" in v):
         href = tag.get("href", "")
         if not href or href.startswith("data:"):
@@ -262,7 +320,7 @@ def clone_login_page(url: str, log_fn=None) -> str:
             # Descargar el CSS y resolver sus url() también
             try:
                 abs_url = urljoin(final_url, href)
-                css_resp = session.get(abs_url, timeout=10)
+                css_resp = _res_session.get(abs_url, timeout=10)
                 css_text = css_resp.text
                 # Reemplazar url(...) dentro del CSS con data URIs
                 import re as _re
@@ -278,7 +336,7 @@ def clone_login_page(url: str, log_fn=None) -> str:
                 new_style.string = f"/* could not inline {href} */"
             tag.replace_with(new_style)
 
-    # ── 4. Inlinar imágenes (<img src=>) ─────────────────────────
+    # ── 5. Inlinar imágenes (<img src=>) ─────────────────────────
     for tag in soup.find_all("img"):
         src = tag.get("src", "")
         if not src or src.startswith("data:"):
