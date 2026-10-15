@@ -223,7 +223,11 @@ def clone_login_page(url: str, log_fn=None) -> str:
                     shutil.which("google-chrome-stable"))
     if chromium_bin:
         _log(f"[*] Usando {chromium_bin} --headless para renderizar {url}")
+        # Intentar primero con --save-page-as MHTML (incluye CSS/imágenes inline)
+        mhtml_ok = False
         try:
+            with tempfile.NamedTemporaryFile(suffix=".mhtml", delete=False, prefix="/tmp/wt_mhtml_") as tf:
+                mhtml_path = tf.name
             result = subprocess.run(
                 [
                     chromium_bin,
@@ -235,23 +239,103 @@ def clone_login_page(url: str, log_fn=None) -> str:
                     "--disable-blink-features=AutomationControlled",
                     "--user-agent=" + HEADERS["User-Agent"],
                     "--timeout=20000",
-                    "--dump-dom",
+                    f"--save-page-as={mhtml_path}",
                     url,
                 ],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=35,
             )
-            if result.returncode == 0 and len(result.stdout) > 500:
-                html_text = result.stdout
-                final_url = url
-                _log(f"[*] Chromium headless OK ({len(html_text)} bytes)")
-            else:
-                _log(f"[!] Chromium headless devolvió poco contenido ({len(result.stdout)} bytes)")
-        except subprocess.TimeoutExpired:
-            _log("[!] Chromium headless tardó demasiado, usando requests")
+            if os.path.exists(mhtml_path) and os.path.getsize(mhtml_path) > 1000:
+                # Parsear MHTML: extraer el HTML principal e inlinar recursos
+                with open(mhtml_path, "rb") as f:
+                    mhtml_data = f.read()
+                os.unlink(mhtml_path)
+                import email, quopri
+                from email import policy as _epolicy
+                msg = email.message_from_bytes(mhtml_data, policy=_epolicy.compat32)
+                # El primer part es el HTML principal
+                parts = {}
+                html_part = None
+                for part in msg.walk():
+                    ct = part.get_content_type()
+                    loc = part.get("Content-Location", "")
+                    enc = part.get("Content-Transfer-Encoding", "")
+                    payload = part.get_payload(decode=True)
+                    if payload is None:
+                        continue
+                    if ct == "text/html" and html_part is None:
+                        html_part = payload.decode("utf-8", errors="replace")
+                    elif loc:
+                        # Guardar recursos por URL
+                        if enc.lower() == "base64":
+                            parts[loc] = (ct, payload)
+                        else:
+                            parts[loc] = (ct, payload)
+                if html_part and len(html_part) > 500:
+                    # Inlinar recursos del MHTML directamente
+                    soup2 = BeautifulSoup(html_part, "html.parser")
+                    for tag in soup2.find_all("link", rel=lambda v: v and "stylesheet" in v):
+                        href = tag.get("href", "")
+                        abs_href = urljoin(url, href)
+                        for loc, (ct, data) in parts.items():
+                            if loc == abs_href or loc.endswith(href.split("?")[0]):
+                                b64 = base64.b64encode(data).decode()
+                                style = soup2.new_tag("style")
+                                style.string = data.decode("utf-8", errors="replace")
+                                tag.replace_with(style)
+                                break
+                    for tag in soup2.find_all("img"):
+                        src = tag.get("src", "")
+                        if src and not src.startswith("data:"):
+                            abs_src = urljoin(url, src)
+                            for loc, (ct, data) in parts.items():
+                                if loc == abs_src:
+                                    b64 = base64.b64encode(data).decode()
+                                    tag["src"] = f"data:{ct};base64,{b64}"
+                                    break
+                    html_text = str(soup2)
+                    final_url = url
+                    mhtml_ok = True
+                    _log(f"[*] Chromium MHTML OK ({len(html_text)} bytes, {len(parts)} recursos inline)")
         except Exception as e:
-            _log(f"[!] Chromium headless falló: {e}")
+            _log(f"[*] MHTML no disponible ({e}), usando --dump-dom")
+            try:
+                os.unlink(mhtml_path)
+            except Exception:
+                pass
+
+        # Fallback a --dump-dom si MHTML no funcionó
+        if not mhtml_ok:
+            try:
+                result = subprocess.run(
+                    [
+                        chromium_bin,
+                        "--headless=new",
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-gpu",
+                        "--disable-dev-shm-usage",
+                        "--disable-blink-features=AutomationControlled",
+                        "--user-agent=" + HEADERS["User-Agent"],
+                        "--timeout=20000",
+                        "--dump-dom",
+                        url,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode == 0 and len(result.stdout) > 500:
+                    html_text = result.stdout
+                    final_url = url
+                    _log(f"[*] Chromium dump-dom OK ({len(html_text)} bytes)")
+                else:
+                    _log(f"[!] Chromium devolvió poco contenido ({len(result.stdout)} bytes)")
+            except subprocess.TimeoutExpired:
+                _log("[!] Chromium tardó demasiado, usando requests")
+            except Exception as e:
+                _log(f"[!] Chromium falló: {e}")
     else:
         _log("[*] chromium no encontrado, usando requests directamente")
 
