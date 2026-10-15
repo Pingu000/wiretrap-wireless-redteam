@@ -248,35 +248,65 @@ def clone_login_page(url: str, log_fn=None) -> str:
         _log(f"[!] requests falló: {e}")
         html_text = ""
 
-    # ── 2. Fallback: Playwright headless (para sitios con JS pesado) ─
+    # ── 2. Fallback: Playwright headless via Node.js (para sitios con JS) ─
     if not html_text or len(html_text) < 500:
-        _log("[*] Intentando con Playwright headless (puede tardar ~10s)...")
+        _log("[*] Intentando con Playwright Node.js headless (puede tardar ~15s)...")
         try:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox",
-                          "--disable-blink-features=AutomationControlled"]
+            import subprocess as _sp, tempfile as _tf, json as _json, shutil as _sh
+            # Verificar que npx/playwright están disponibles
+            npx_path = _sh.which("npx")
+            if not npx_path:
+                raise RuntimeError("npx no encontrado")
+            # Script Node.js inline que usa el playwright instalado
+            js_script = f"""
+const {{ chromium }} = require('playwright');
+(async () => {{
+    const browser = await chromium.launch({{
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox',
+               '--disable-blink-features=AutomationControlled']
+    }});
+    const ctx = await browser.newContext({{
+        userAgent: '{headers["User-Agent"]}',
+        locale: 'es-ES',
+        ignoreHTTPSErrors: true
+    }});
+    const page = await ctx.newPage();
+    try {{
+        await page.goto({_json.dumps(url)}, {{ waitUntil: 'networkidle', timeout: 30000 }});
+        const result = {{ url: page.url(), html: await page.content() }};
+        process.stdout.write(JSON.stringify(result));
+    }} catch(e) {{
+        process.stdout.write(JSON.stringify({{ error: e.message }}));
+    }} finally {{
+        await browser.close();
+    }}
+}})();
+"""
+            # Escribir script a fichero temporal
+            with _tf.NamedTemporaryFile(mode='w', suffix='.js',
+                                        delete=False, prefix='/tmp/wt_pw_') as tf:
+                tf.write(js_script)
+                tf_path = tf.name
+            try:
+                result = _sp.run(
+                    ['node', tf_path],
+                    capture_output=True, text=True, timeout=40
                 )
-                ctx = browser.new_context(
-                    user_agent=headers["User-Agent"],
-                    locale="es-ES",
-                    viewport={"width": 1280, "height": 800},
-                    ignore_https_errors=True,
-                )
-                page = ctx.new_page()
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                final_url = page.url
-                html_text = page.content()
-                browser.close()
-            _log(f"[*] Playwright OK ({len(html_text)} bytes). URL final: {final_url}")
-        except ImportError:
-            _log("[!] Playwright no disponible. Instala: pip3 install playwright --break-system-packages && playwright install chromium")
-            if not html_text:
-                return ""
+                if result.returncode == 0 and result.stdout:
+                    data = _json.loads(result.stdout)
+                    if 'error' in data:
+                        raise RuntimeError(data['error'])
+                    html_text = data.get('html', '')
+                    final_url = data.get('url', url)
+                    _log(f"[*] Playwright Node.js OK ({len(html_text)} bytes). URL: {final_url}")
+                else:
+                    raise RuntimeError(result.stderr[:200] if result.stderr else 'sin output')
+            finally:
+                try: os.unlink(tf_path)
+                except Exception: pass
         except Exception as e2:
-            _log(f"[!] Playwright también falló: {e2}")
+            _log(f"[!] Playwright Node.js falló: {e2}")
             if not html_text:
                 return ""
 
