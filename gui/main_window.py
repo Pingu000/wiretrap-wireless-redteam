@@ -44,8 +44,6 @@ class SignalBridge(QObject):
     cp_sniff_data    = pyqtSignal(object)   # CapturedData post-login
     cp_started       = pyqtSignal()
     cp_stopped       = pyqtSignal()
-    cp_clone_ok      = pyqtSignal()
-    cp_clone_fail    = pyqtSignal()
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -91,8 +89,6 @@ class WireTrap(QMainWindow):
         self.bridge.flood_beacon_sent.connect(self._on_flood_beacon_sent)
         self.bridge.flood_stopped.connect(self._on_flood_stopped)
         self.bridge.cp_log.connect(self._on_cp_log)
-        self.bridge.cp_clone_ok.connect(self._on_clone_success)
-        self.bridge.cp_clone_fail.connect(self._on_clone_error)
         self.bridge.cp_credential.connect(self._on_cp_credential)
         self.bridge.cp_sniff_data.connect(self._on_cp_sniff_data)
         self.bridge.cp_started.connect(self._on_cp_started)
@@ -559,9 +555,13 @@ class WireTrap(QMainWindow):
             # Volver al hilo GUI
             if ok:
                 self.bridge.cp_log.emit(f"[+] Plantilla clonada desde {url}")
-                self.bridge.cp_clone_ok.emit()
+                # Usar signal para actualizar la GUI desde el hilo
+                from PyQt6.QtCore import QMetaObject, Qt as _Qt
+                QMetaObject.invokeMethod(self, "_on_clone_success",
+                                         _Qt.ConnectionType.QueuedConnection)
             else:
-                self.bridge.cp_clone_fail.emit()
+                QMetaObject.invokeMethod(self, "_on_clone_error",
+                                         _Qt.ConnectionType.QueuedConnection)
 
         import threading
         threading.Thread(target=_do_clone, daemon=True).start()

