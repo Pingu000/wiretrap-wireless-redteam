@@ -183,17 +183,10 @@ class WireTrap(QMainWindow):
         btn_captive.setStyleSheet("background-color: #1a1100; border: 2px solid #ff8800; color: white;")
         btn_captive.clicked.connect(lambda: self.stack.setCurrentIndex(4))
 
-        btn_dns = QPushButton("🌍 DNS Spoofing [Próximamente]")
-        btn_dns.setFixedHeight(60)
-        btn_dns.setFixedWidth(400)
-        btn_dns.setFont(QFont("Monospace", 12))
-        btn_dns.setEnabled(False)
-
         grid.addWidget(btn_deauth_et, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_pmkid, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_flood, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_captive, alignment=Qt.AlignmentFlag.AlignCenter)
-        grid.addWidget(btn_dns, alignment=Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(grid)
 
@@ -333,6 +326,75 @@ class WireTrap(QMainWindow):
         sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet("color: #333;")
         opts_layout.addWidget(sep2)
+
+        # ── DNS Spoofing ──────────────────────────────────────────
+        dns_group = QGroupBox("🌍 DNS SPOOFING POR DOMINIO")
+        dns_group.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        dns_group.setStyleSheet(
+            "QGroupBox { border: 1px solid #553300; border-radius: 4px; margin-top: 6px; padding-top: 4px; }"
+            "QGroupBox::title { color: #ff8800; subcontrol-origin: margin; left: 8px; }"
+        )
+        dns_inner = QVBoxLayout(dns_group)
+        dns_inner.setSpacing(6)
+
+        self.chk_dns_spoof = QCheckBox("Activar DNS Spoofing por dominios específicos")
+        self.chk_dns_spoof.setFont(QFont("Monospace", 9))
+        self.chk_dns_spoof.setStyleSheet("color: #ff8800;")
+        dns_inner.addWidget(self.chk_dns_spoof)
+
+        dns_hint = QLabel(
+            "Redirige dominios concretos al portal incluso\n"
+            "después del login (uno por línea, sin http://):"
+        )
+        dns_hint.setFont(QFont("Monospace", 8))
+        dns_hint.setStyleSheet("color: #888888;")
+        dns_inner.addWidget(dns_hint)
+
+        self.dns_domains_edit = QTextEdit()
+        self.dns_domains_edit.setFont(QFont("Monospace", 9))
+        self.dns_domains_edit.setFixedHeight(80)
+        self.dns_domains_edit.setPlaceholderText(
+            "banco.es\ngoogle.com\nfacebook.com"
+        )
+        self.dns_domains_edit.setStyleSheet(
+            "background: #0d0d0d; color: #ff8800; border: 1px solid #553300;"
+        )
+        dns_inner.addWidget(self.dns_domains_edit)
+
+        dns_ip_row = QHBoxLayout()
+        dns_ip_lbl = QLabel("IP destino:")
+        dns_ip_lbl.setFont(QFont("Monospace", 9))
+        self.dns_target_ip = QLineEdit("10.0.0.1")
+        self.dns_target_ip.setFont(QFont("Monospace", 9))
+        self.dns_target_ip.setFixedWidth(120)
+        self.dns_target_ip.setToolTip(
+            "IP a la que resolver los dominios espoofeados.\n"
+            "10.0.0.1 = portal cautivo (por defecto).\n"
+            "Puede ser cualquier IP que controles."
+        )
+        dns_ip_row.addWidget(dns_ip_lbl)
+        dns_ip_row.addWidget(self.dns_target_ip)
+        dns_ip_row.addStretch()
+        dns_inner.addLayout(dns_ip_row)
+
+        dns_hint.setVisible(False)
+        self.dns_domains_edit.setVisible(False)
+        dns_ip_lbl.setVisible(False)
+        self.dns_target_ip.setVisible(False)
+
+        def _on_dns_spoof_toggled(checked):
+            dns_hint.setVisible(checked)
+            self.dns_domains_edit.setVisible(checked)
+            dns_ip_lbl.setVisible(checked)
+            self.dns_target_ip.setVisible(checked)
+
+        self.chk_dns_spoof.toggled.connect(_on_dns_spoof_toggled)
+        opts_layout.addWidget(dns_group)
+
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet("color: #333;")
+        opts_layout.addWidget(sep3)
 
         # Interfaz de salida (internet real)
         out_label = QLabel("Interfaz internet (post-login):")
@@ -614,6 +676,18 @@ class WireTrap(QMainWindow):
         if template == "custom" and hasattr(self, "_clone_portal") and self._clone_portal:
             self.captive_portal.custom_html = self._clone_portal.custom_html
             self.captive_portal.template_type = "custom"
+
+        # Configurar DNS Spoofing si está activado
+        if self.chk_dns_spoof.isChecked():
+            raw_domains = self.dns_domains_edit.toPlainText().strip()
+            domains = [
+                d.strip().lower().lstrip("http://").lstrip("https://").split("/")[0]
+                for d in raw_domains.splitlines()
+                if d.strip()
+            ]
+            target_ip = self.dns_target_ip.text().strip() or "10.0.0.1"
+            self.captive_portal.dns_spoof_domains = domains
+            self.captive_portal.dns_spoof_target_ip = target_ip
 
         import threading
         t = threading.Thread(
