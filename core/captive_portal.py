@@ -782,6 +782,9 @@ class CaptivePortal:
                 d = entry["domain"].strip().lower() if isinstance(entry, dict) else entry.strip().lower()
                 if d:
                     conf += "address=/" + d + "/" + target + "\n"
+                    # Anadir variante www. automaticamente
+                    if not d.startswith("www."):
+                        conf += "address=/www." + d + "/" + target + "\n"
             self._log("[DNS Spoof] " + str(len(self.dns_spoof_domains)) + " dominios → " + target)
         else:
             conf = (
