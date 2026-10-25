@@ -347,49 +347,92 @@ class WireTrap(QMainWindow):
         dns_inner.addWidget(self.chk_dns_spoof)
 
         dns_hint = QLabel(
-            "Redirige dominios concretos al portal incluso\n"
-            "después del login (uno por línea, sin http://):"
+            "Por cada dominio, indica la URL de login a clonar (opcional).\n"
+            "Si dejas la URL vacía, muestra el captive portal genérico."
         )
         dns_hint.setFont(QFont("Monospace", 8))
         dns_hint.setStyleSheet("color: #888888;")
         dns_inner.addWidget(dns_hint)
 
-        self.dns_domains_edit = QTextEdit()
-        self.dns_domains_edit.setFont(QFont("Monospace", 9))
-        self.dns_domains_edit.setFixedHeight(80)
-        self.dns_domains_edit.setPlaceholderText(
-            "banco.es\ngoogle.com\nfacebook.com"
+        # Tabla: Dominio | URL a clonar
+        self.dns_spoof_table = QTableWidget()
+        self.dns_spoof_table.setColumnCount(2)
+        self.dns_spoof_table.setHorizontalHeaderLabels(["Dominio", "URL a clonar (opcional)"])
+        self.dns_spoof_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.dns_spoof_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.dns_spoof_table.setFont(QFont("Monospace", 9))
+        self.dns_spoof_table.setFixedHeight(120)
+        self.dns_spoof_table.setRowCount(3)
+        self.dns_spoof_table.setStyleSheet(
+            "QTableWidget { background: #0d0d0d; color: #ff8800; border: 1px solid #553300; }"
+            "QHeaderView::section { background: #1a0a00; color: #ff8800; border: 1px solid #553300; }"
         )
-        self.dns_domains_edit.setStyleSheet(
-            "background: #0d0d0d; color: #ff8800; border: 1px solid #553300;"
+        for row in range(3):
+            self.dns_spoof_table.setItem(row, 0, QTableWidgetItem(""))
+            self.dns_spoof_table.setItem(row, 1, QTableWidgetItem(""))
+        dns_inner.addWidget(self.dns_spoof_table)
+
+        dns_btn_row = QHBoxLayout()
+        btn_dns_add = QPushButton("+ Añadir fila")
+        btn_dns_add.setFont(QFont("Monospace", 8))
+        btn_dns_add.setFixedHeight(24)
+        btn_dns_add.setStyleSheet(
+            "QPushButton { background: #1a0a00; color: #ff8800; border: 1px solid #553300; }"
+            "QPushButton:hover { background: #2a1400; }"
         )
-        dns_inner.addWidget(self.dns_domains_edit)
+        btn_dns_del = QPushButton("− Eliminar fila")
+        btn_dns_del.setFont(QFont("Monospace", 8))
+        btn_dns_del.setFixedHeight(24)
+        btn_dns_del.setStyleSheet(
+            "QPushButton { background: #1a0a00; color: #ff8800; border: 1px solid #553300; }"
+            "QPushButton:hover { background: #2a1400; }"
+        )
+
+        def _dns_add_row():
+            r = self.dns_spoof_table.rowCount()
+            self.dns_spoof_table.insertRow(r)
+            self.dns_spoof_table.setItem(r, 0, QTableWidgetItem(""))
+            self.dns_spoof_table.setItem(r, 1, QTableWidgetItem(""))
+
+        def _dns_del_row():
+            row = self.dns_spoof_table.currentRow()
+            if row >= 0:
+                self.dns_spoof_table.removeRow(row)
+
+        btn_dns_add.clicked.connect(_dns_add_row)
+        btn_dns_del.clicked.connect(_dns_del_row)
+        dns_btn_row.addWidget(btn_dns_add)
+        dns_btn_row.addWidget(btn_dns_del)
+        dns_btn_row.addStretch()
+        dns_inner.addLayout(dns_btn_row)
 
         dns_ip_row = QHBoxLayout()
-        dns_ip_lbl = QLabel("IP destino:")
+        dns_ip_lbl = QLabel("IP destino (tu máquina):")
         dns_ip_lbl.setFont(QFont("Monospace", 9))
         self.dns_target_ip = QLineEdit("10.0.0.1")
         self.dns_target_ip.setFont(QFont("Monospace", 9))
-        self.dns_target_ip.setFixedWidth(120)
+        self.dns_target_ip.setFixedWidth(130)
         self.dns_target_ip.setToolTip(
-            "IP a la que resolver los dominios espoofeados.\n"
-            "10.0.0.1 = portal cautivo (por defecto).\n"
-            "Puede ser cualquier IP que controles."
+            "IP a la que dnsmasq resolverá los dominios espoofeados.\n"
+            "Debe ser la IP de tu máquina (10.0.0.1 por defecto)."
         )
         dns_ip_row.addWidget(dns_ip_lbl)
         dns_ip_row.addWidget(self.dns_target_ip)
         dns_ip_row.addStretch()
         dns_inner.addLayout(dns_ip_row)
 
-        # Mostrar/ocultar el cuerpo según checkbox
         dns_hint.setVisible(False)
-        self.dns_domains_edit.setVisible(False)
+        self.dns_spoof_table.setVisible(False)
+        btn_dns_add.setVisible(False)
+        btn_dns_del.setVisible(False)
         dns_ip_lbl.setVisible(False)
         self.dns_target_ip.setVisible(False)
 
         def _on_dns_spoof_toggled(checked):
             dns_hint.setVisible(checked)
-            self.dns_domains_edit.setVisible(checked)
+            self.dns_spoof_table.setVisible(checked)
+            btn_dns_add.setVisible(checked)
+            btn_dns_del.setVisible(checked)
             dns_ip_lbl.setVisible(checked)
             self.dns_target_ip.setVisible(checked)
 
@@ -439,9 +482,9 @@ class WireTrap(QMainWindow):
         creds_layout = QVBoxLayout(creds_group)
 
         self.cp_creds_table = QTableWidget()
-        self.cp_creds_table.setColumnCount(4)
+        self.cp_creds_table.setColumnCount(5)
         self.cp_creds_table.setHorizontalHeaderLabels(
-            ["Hora", "IP Víctima", "Email / Usuario", "Contraseña"]
+            ["Hora", "IP Víctima", "Dominio", "Email / Usuario", "Contraseña"]
         )
         self.cp_creds_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
@@ -558,6 +601,7 @@ class WireTrap(QMainWindow):
         for col, val in enumerate([
             entry.get("timestamp", ""),
             entry.get("ip", ""),
+            entry.get("host", "portal"),
             entry.get("email", ""),
             entry.get("password", ""),
         ]):
@@ -680,14 +724,26 @@ class WireTrap(QMainWindow):
 
         # Configurar DNS Spoofing si está activado
         if self.chk_dns_spoof.isChecked():
-            raw_domains = self.dns_domains_edit.toPlainText().strip()
-            domains = [
-                d.strip().lower().lstrip("http://").lstrip("https://").split("/")[0]
-                for d in raw_domains.splitlines()
-                if d.strip()
-            ]
+            spoof_entries = []
+            for row in range(self.dns_spoof_table.rowCount()):
+                cell_domain = self.dns_spoof_table.item(row, 0)
+                cell_url    = self.dns_spoof_table.item(row, 1)
+                raw_domain  = cell_domain.text().strip() if cell_domain else ""
+                clone_url   = cell_url.text().strip()    if cell_url    else ""
+                if not raw_domain:
+                    continue
+                domain = raw_domain.lower()
+                for prefix in ("https://", "http://"):
+                    if domain.startswith(prefix):
+                        domain = domain[len(prefix):]
+                domain = domain.split("/")[0]
+                spoof_entries.append({
+                    "domain":    domain,
+                    "clone_url": clone_url,
+                    "html":      ""
+                })
             target_ip = self.dns_target_ip.text().strip() or "10.0.0.1"
-            self.captive_portal.dns_spoof_domains = domains
+            self.captive_portal.dns_spoof_domains   = spoof_entries
             self.captive_portal.dns_spoof_target_ip = target_ip
 
         import threading

