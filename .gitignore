@@ -10,3 +10,9 @@ venv/
 captured_*.txt
 *.pcap
 WireTrap_Context.md
+
+# Memorias y documentos privados
+*.docx
+*.pdf
+no-github/
+.claude/
