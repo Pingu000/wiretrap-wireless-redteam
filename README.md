@@ -1,62 +1,66 @@
 # WireTrap — Wireless Red Team Framework
 
-Framework modular de auditoría ofensiva WiFi con GUI, desarrollado como proyecto individual
-para la asignatura **"Proyectos de Ciberseguridad - Ciberejercicios"** en U-TAD Madrid.
+Modular offensive WiFi auditing framework with GUI, developed as a Final Year Project (TFG)
+at **U-TAD Madrid** (Software Engineering, Cybersecurity specialization).
 
-> ⚠️ No me hago responsable del uso que se le dé a esta herramienta.
+> ⚠️ This tool is intended for authorized security testing only. The author is not responsible for any misuse.
 
-## Stack técnico
+## Tech Stack
 
 - **OS:** Kali Linux (VirtualBox)
-- **Lenguaje:** Python 3
+- **Language:** Python 3
 - **GUI:** PyQt6
-- **Captura de tráfico:** Scapy
-- **AP falso:** hostapd + dnsmasq
-- **Post-explotación:** mitmproxy, Scapy
-- **Hardware:** Alfa AWUS036ACH v.2 (RTL8812AU, `wlan1`, principal) + Alfa AWUS036ACHM
-  (MT7610U, `wlan0mon`, monitor)
+- **Packet capture:** Scapy
+- **Fake AP:** hostapd + dnsmasq
+- **Post-exploitation:** Scapy, iptables
+- **Hardware:** Alfa AWUS036ACH v.2 (RTL8812AU, `wlan1`, AP mode) + Alfa AWUS036ACHM (MT7610U, `wlan0`, monitor mode)
 
-## Flujo funcional
+## Attack Flow
 
-1. Escaneo pasivo de APs y clientes en modo monitor (channel hopping 2.4/5 GHz)
-2. Motor de decisión automático por perfil de seguridad (OPEN/WEP/WPA/WPA2/WPA3)
-3. Deauth en bucle continuo suplantando al AP legítimo
-4. Evil Twin con hostapd + dnsmasq + NAT (internet real para el cliente)
-5. Post-explotación: captura HTTP en tiempo real, DNS spoofing (pendiente), inyección HTTP (pendiente)
-6. Informe PDF automatizado (pendiente)
+1. Passive scan of APs and clients in monitor mode (channel hopping 2.4/5 GHz)
+2. Automatic decision engine based on target security profile (OPEN/WEP/WPA/WPA2/WPA3)
+3. Continuous deauthentication loop impersonating the legitimate AP
+4. Evil Twin with hostapd + dnsmasq + NAT (real internet for the victim)
+5. Captive portal with cloned login page (DNS spoofing + Flask)
+6. Post-exploitation: real-time HTTP capture, credential harvesting
+7. Automated PDF report (pending)
 
-## Estructura
+## Project Structure
 
 ```
 WireTrap/
-├── main.py                    # Punto de entrada, verifica root, lanza GUI
+├── main.py                        # Entry point — checks root, launches GUI
 ├── core/
-│   ├── scanner.py              # Escaneo pasivo 802.11, channel hopping
-│   ├── deauth.py                # Deauth loop con Scapy
-│   ├── evil_twin.py             # hostapd + dnsmasq + NAT
-│   └── decision_engine.py       # Motor de decisión por perfil de AP
+│   ├── scanner.py                 # Passive 802.11 scan, channel hopping
+│   ├── deauth.py                  # Deauth loop via Scapy
+│   ├── evil_twin.py               # hostapd + dnsmasq + NAT
+│   ├── captive_portal.py          # Cloned login page + Flask server + DNS spoof
+│   └── decision_engine.py         # Attack decision engine by AP profile
 ├── post_exploitation/
-│   └── http_capture.py          # Captura credenciales/cookies HTTP
-├── reporting/                    # Pendiente: generador PDF
+│   └── http_capture.py            # HTTP credential/cookie capture
+├── reporting/                     # Pending: PDF report generator
 ├── gui/
-│   └── main_window.py            # GUI PyQt6
+│   └── main_window.py             # PyQt6 GUI
 └── utils/
-    └── oui_lookup.py              # Lookup fabricante por MAC (con cache)
+    └── oui_lookup.py              # MAC vendor lookup (with cache)
 ```
 
-## Estado / pendiente
+## Status
 
-- [x] Fix señal siempre 0 dBm (`_get_signal`)
-- [x] Fix detección de dispositivos en modo ahorro (probe requests)
-- [ ] DNS spoofing (`post_exploitation/dns_spoof.py`)
-- [ ] Generador de informes PDF (`reporting/report_generator.py`)
-- [ ] Integración de post-explotación en la GUI
-- [ ] Portal cautivo / página clonada
+- [x] Fix signal always 0 dBm (`_get_signal`)
+- [x] Fix device detection via probe requests (power-saving mode)
+- [x] Evil Twin with real internet (NAT/iptables)
+- [x] Captive portal with page cloning (chromium + monolith)
+- [x] DNS spoofing via dnsmasq
+- [ ] DNS spoofing hybrid mode (custom domains mid-session)
+- [ ] HTTP injection
+- [ ] PDF report generator (`reporting/report_generator.py`)
+- [ ] Full post-exploitation GUI integration
 
-## Ejecución
+## Usage
 
 ```bash
 sudo python3 main.py
 ```
 
-Requiere permisos de root para modo monitor, hostapd/dnsmasq e iptables.
+Requires root for monitor mode, hostapd/dnsmasq, and iptables.
