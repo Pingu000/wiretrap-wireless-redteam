@@ -832,83 +832,8 @@ class WireTrap(QMainWindow):
         opts_layout = QVBoxLayout(opts_group)
         opts_layout.setSpacing(18)
 
-        # Canal
-        ch_row = QHBoxLayout()
-        ch_label = QLabel("Canal fijo:")
-        ch_label.setFont(QFont("Monospace", 10))
-        self.flood_channel_combo = QComboBox()
-        self.flood_channel_combo.addItems([str(i) for i in range(1, 15)])
-        self.flood_channel_combo.setCurrentText("6")
-        self.flood_channel_combo.setFixedWidth(70)
-        ch_row.addWidget(ch_label)
-        ch_row.addStretch()
-        ch_row.addWidget(self.flood_channel_combo)
-        opts_layout.addLayout(ch_row)
-
-        # Rotar canales
-        self.flood_chk_rotate = QCheckBox(" Rotar canales (1 / 6 / 11)")
-        self.flood_chk_rotate.setFont(QFont("Monospace", 10))
-        self.flood_chk_rotate.setStyleSheet("color: #5588ff;")
-        self.flood_chk_rotate.stateChanged.connect(
-            lambda s: self.flood_channel_combo.setEnabled(s != 2)
-        )
-        opts_layout.addWidget(self.flood_chk_rotate)
-
-        # Velocidad
-        spd_label = QLabel("Velocidad (beacons/s):")
-        spd_label.setFont(QFont("Monospace", 10))
-        opts_layout.addWidget(spd_label)
-
-        self.flood_speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.flood_speed_slider.setMinimum(1)
-        self.flood_speed_slider.setMaximum(5)
-        self.flood_speed_slider.setValue(3)
-        self.flood_speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
-        self.flood_speed_slider.setTickInterval(1)
-        opts_layout.addWidget(self.flood_speed_slider)
-
-        self.flood_speed_value = QLabel("200 pkt/s  (medio)")
-        self.flood_speed_value.setFont(QFont("Monospace", 9))
-        self.flood_speed_value.setStyleSheet("color: #aaaaaa;")
-        opts_layout.addWidget(self.flood_speed_value)
-
-        speed_map = {
-            1: "50 pkt/s   (lento)",
-            2: "100 pkt/s  (bajo)",
-            3: "200 pkt/s  (medio)",
-            4: "350 pkt/s  (rápido)",
-            5: "500 pkt/s  (máximo)",
-        }
-        self.flood_speed_slider.valueChanged.connect(
-            lambda v: self.flood_speed_value.setText(speed_map[v])
-        )
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("color: #333;")
-        opts_layout.addWidget(sep)
-
-        # Mezclar SSIDs reales
-        self.flood_chk_real = QCheckBox(" Mezclar SSIDs reales\n (escanear primero)")
-        self.flood_chk_real.setFont(QFont("Monospace", 10))
-        self.flood_chk_real.setStyleSheet("color: #00ff88;")
-        opts_layout.addWidget(self.flood_chk_real)
-
-        # Botón escanear para capturar SSIDs reales
-        self.btn_flood_scan = QPushButton("🔍 Escanear SSIDs del entorno")
-        self.btn_flood_scan.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
-        self.btn_flood_scan.setStyleSheet(
-            "QPushButton { background: #1a2a4a; border: 1px solid #5588ff; color: #5588ff; padding: 6px; border-radius: 4px; }"
-            "QPushButton:hover { background: #5588ff; color: white; }"
-        )
-        self.btn_flood_scan.clicked.connect(self._on_flood_scan_clicked)
-        opts_layout.addWidget(self.btn_flood_scan)
-
-        self.flood_real_ssids_label = QLabel("SSIDs capturados: 0")
-        self.flood_real_ssids_label.setFont(QFont("Monospace", 9))
-        self.flood_real_ssids_label.setStyleSheet("color: #aaaaaa;")
-        opts_layout.addWidget(self.flood_real_ssids_label)
-
+        # Canal (rotación 1/6/11), velocidad (500 pkt/s) y mezcla de SSIDs
+        # reales son fijos de fábrica — no configurables desde la GUI.
         opts_layout.addStretch()
 
         # Anunciar WPA2
@@ -938,21 +863,9 @@ class WireTrap(QMainWindow):
         count_desc.setFont(QFont("Monospace", 11))
         count_desc.setStyleSheet("color: #aaaaaa;")
 
-        self.flood_lbl_ssids = QLabel("0")
-        self.flood_lbl_ssids.setFont(QFont("Monospace", 36, QFont.Weight.Bold))
-        self.flood_lbl_ssids.setStyleSheet("color: #00ff88;")
-        self.flood_lbl_ssids.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        ssids_desc = QLabel("SSIDs\nreales mezclados")
-        ssids_desc.setFont(QFont("Monospace", 11))
-        ssids_desc.setStyleSheet("color: #aaaaaa;")
-
         stats_layout.addStretch()
         stats_layout.addWidget(self.flood_lbl_count)
         stats_layout.addWidget(count_desc)
-        stats_layout.addSpacing(60)
-        stats_layout.addWidget(self.flood_lbl_ssids)
-        stats_layout.addWidget(ssids_desc)
         stats_layout.addStretch()
 
         stats_group.setFixedHeight(130)
@@ -1001,58 +914,17 @@ class WireTrap(QMainWindow):
         ts = datetime.now().strftime("%H:%M:%S")
         self.flood_log.append(f"[{ts}] {msg}")
 
-    def _on_flood_scan_clicked(self):
-        """Escaneo rápido de 8 s para capturar SSIDs reales del entorno."""
-        iface = self.flood_iface_combo.currentText()
-        if not iface:
-            QMessageBox.warning(self, "Error", "Selecciona una interfaz.")
-            return
-
-        self.btn_flood_scan.setEnabled(False)
-        self.btn_flood_scan.setText("🔍 Escaneando... (8s)")
-        self._flood_log(f"Escaneando SSIDs reales en {iface}...")
-        self._flood_captured_ssids = []
-
-        flood_scanner = Scanner(iface)
-
-        def on_ap(ap):
-            if ap.ssid and ap.ssid not in self._flood_captured_ssids:
-                self._flood_captured_ssids.append(ap.ssid)
-                self.flood_real_ssids_label.setText(
-                    f"SSIDs capturados: {len(self._flood_captured_ssids)}"
-                )
-                self.flood_lbl_ssids.setText(str(len(self._flood_captured_ssids)))
-
-        flood_scanner.on_ap_found = on_ap
-        flood_scanner.start()
-
-        def stop_scan():
-            flood_scanner.stop()
-            self._flood_log(
-                f"Escaneo completado: {len(self._flood_captured_ssids)} SSIDs capturados"
-            )
-            self.btn_flood_scan.setEnabled(True)
-            self.btn_flood_scan.setText("🔍 Escanear SSIDs del entorno")
-
-        QTimer.singleShot(8000, stop_scan)
-
     def _on_flood_start_clicked(self):
         iface = self.flood_iface_combo.currentText()
         if not iface:
             QMessageBox.warning(self, "Error", "Selecciona una interfaz monitor.")
             return
 
-        # Velocidad: el slider ahora mapea a paquetes/segundo para mdk4
-        pps_map = {
-            1: 50,
-            2: 100,
-            3: 200,
-            4: 350,
-            5: 500,
-        }
-        pps = pps_map[self.flood_speed_slider.value()]
-        channel = int(self.flood_channel_combo.currentText())
-        rotate = self.flood_chk_rotate.isChecked()
+        # Ajustes fijos de fábrica (no configurables desde la GUI):
+        # rotación de canales 1/6/11 siempre activa y velocidad máxima.
+        pps = 500
+        channel = 6  # no se usa realmente: rotate=True rota 1/6/11 igualmente
+        rotate = True
         wpa2 = self.flood_chk_wpa2.isChecked()
 
         self.flooder = BeaconFlooder(iface)
@@ -1077,7 +949,6 @@ class WireTrap(QMainWindow):
         self.flood_status_label.setStyleSheet("color: #5588ff; font-weight: bold;")
         self.btn_flood_start.setEnabled(False)
         self.btn_flood_stop.setEnabled(True)
-        self.btn_flood_scan.setEnabled(False)
 
     def _on_flood_stop_clicked(self):
         if self.flooder:
@@ -1092,7 +963,6 @@ class WireTrap(QMainWindow):
         self.flood_status_label.setStyleSheet("color: gray; font-weight: bold;")
         self.btn_flood_start.setEnabled(True)
         self.btn_flood_stop.setEnabled(False)
-        self.btn_flood_scan.setEnabled(True)
 
     def _setup_deauth_ui(self, parent_widget):
         main_layout = QVBoxLayout(parent_widget)
