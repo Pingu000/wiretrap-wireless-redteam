@@ -8,7 +8,8 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QTableWidget, QTableWidgetItem, QPushButton,
     QLabel, QComboBox, QHeaderView, QFrame, QSplitter,
     QTextEdit, QGroupBox, QMessageBox, QLineEdit,
-    QStackedWidget, QCheckBox, QSlider, QAbstractItemView
+    QStackedWidget, QCheckBox, QSlider, QAbstractItemView,
+    QFileDialog
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont
@@ -271,13 +272,16 @@ class WireTrap(QMainWindow):
         tpl_label.setFont(QFont("Monospace", 10))
         opts_layout.addWidget(tpl_label)
         self.cp_template_combo = QComboBox()
-        self.cp_template_combo.addItems(["Google", "Personalizada (URL)"])
+        self.cp_template_combo.addItems([
+            "Google", "Personalizada (URL)", "Personalizada (archivo HTML)"
+        ])
         self.cp_template_combo.setFont(QFont("Monospace", 10))
         opts_layout.addWidget(self.cp_template_combo)
 
         tpl_hint = QLabel(
             "  Google → página estilo Google\n"
-            "  Personalizada → clonar una URL real"
+            "  URL → clonar una web real\n"
+            "  Archivo HTML → usar un .html propio"
         )
         tpl_hint.setFont(QFont("Monospace", 8))
         tpl_hint.setStyleSheet("color: #888888;")
@@ -288,7 +292,7 @@ class WireTrap(QMainWindow):
         sep.setStyleSheet("color: #333;")
         opts_layout.addWidget(sep)
 
-        # URL para plantilla personalizada (visible solo cuando se elige "Personalizada")
+        # URL para plantilla personalizada (visible solo cuando se elige "Personalizada (URL)")
         self.cp_url_label = QLabel("URL a clonar:")
         self.cp_url_label.setFont(QFont("Monospace", 10))
         self.cp_url_input = QLineEdit()
@@ -316,12 +320,46 @@ class WireTrap(QMainWindow):
         opts_layout.addWidget(self.btn_cp_clone)
         opts_layout.addWidget(self.cp_clone_status)
 
+        # Archivo HTML propio (visible solo cuando se elige "Personalizada (archivo HTML)")
+        self.cp_file_label = QLabel("Archivo HTML:")
+        self.cp_file_label.setFont(QFont("Monospace", 10))
+        self.cp_file_path_display = QLineEdit()
+        self.cp_file_path_display.setFont(QFont("Monospace", 9))
+        self.cp_file_path_display.setReadOnly(True)
+        self.cp_file_path_display.setPlaceholderText("Ningún archivo seleccionado")
+        self.btn_cp_browse_file = QPushButton("📁 Seleccionar archivo...")
+        self.btn_cp_browse_file.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+        self.btn_cp_browse_file.setStyleSheet(
+            "QPushButton { background: #1a0d00; border: 1px solid #ff8800; color: #ff8800; padding: 4px 8px; border-radius: 4px; }"
+            "QPushButton:hover { background: #ff8800; color: black; }"
+        )
+        self.btn_cp_browse_file.clicked.connect(self._on_cp_browse_file_clicked)
+        self.cp_file_status = QLabel("")
+        self.cp_file_status.setFont(QFont("Monospace", 8))
+        self.cp_file_status.setStyleSheet("color: #888888;")
+        self.cp_file_status.setWordWrap(True)
+
+        self.cp_file_label.setVisible(False)
+        self.cp_file_path_display.setVisible(False)
+        self.btn_cp_browse_file.setVisible(False)
+        self.cp_file_status.setVisible(False)
+
+        opts_layout.addWidget(self.cp_file_label)
+        opts_layout.addWidget(self.cp_file_path_display)
+        opts_layout.addWidget(self.btn_cp_browse_file)
+        opts_layout.addWidget(self.cp_file_status)
+
         def _on_template_changed(text):
-            is_custom = (text == "Personalizada (URL)")
-            self.cp_url_label.setVisible(is_custom)
-            self.cp_url_input.setVisible(is_custom)
-            self.btn_cp_clone.setVisible(is_custom)
-            self.cp_clone_status.setVisible(is_custom)
+            is_url    = (text == "Personalizada (URL)")
+            is_file   = (text == "Personalizada (archivo HTML)")
+            self.cp_url_label.setVisible(is_url)
+            self.cp_url_input.setVisible(is_url)
+            self.btn_cp_clone.setVisible(is_url)
+            self.cp_clone_status.setVisible(is_url)
+            self.cp_file_label.setVisible(is_file)
+            self.cp_file_path_display.setVisible(is_file)
+            self.btn_cp_browse_file.setVisible(is_file)
+            self.cp_file_status.setVisible(is_file)
 
         self.cp_template_combo.currentTextChanged.connect(_on_template_changed)
 
@@ -622,6 +660,7 @@ class WireTrap(QMainWindow):
         self.cp_template_combo.setEnabled(False)
         self.cp_url_input.setEnabled(False)
         self.btn_cp_clone.setEnabled(False)
+        self.btn_cp_browse_file.setEnabled(False)
         self.cp_iface_combo.setEnabled(False)
         self.cp_out_iface_combo.setEnabled(False)
 
@@ -635,6 +674,7 @@ class WireTrap(QMainWindow):
         self.cp_template_combo.setEnabled(True)
         self.cp_url_input.setEnabled(True)
         self.btn_cp_clone.setEnabled(True)
+        self.btn_cp_browse_file.setEnabled(True)
         self.cp_iface_combo.setEnabled(True)
         self.cp_out_iface_combo.setEnabled(True)
         self._cp_log("Portal detenido.")
@@ -683,6 +723,37 @@ class WireTrap(QMainWindow):
         self.btn_cp_clone.setEnabled(True)
         self._clone_portal = None
 
+    def _on_cp_browse_file_clicked(self):
+        """Carga un .html propio del disco como plantilla de login, en vez
+        de clonar una URL real. Útil cuando el pipeline de clonado no da
+        buen resultado contra una web concreta."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Seleccionar plantilla HTML", "",
+            "Archivos HTML (*.html *.htm);;Todos los archivos (*)"
+        )
+        if not path:
+            return
+
+        self.cp_file_path_display.setText(path)
+        self.cp_file_status.setText("⏳ Cargando archivo...")
+        self.cp_file_status.setStyleSheet("color: #ffcc00;")
+
+        from core.captive_portal import CaptivePortal as _CP
+        iface = self.cp_iface_combo.currentText() or "wlan0"
+        self._clone_portal = _CP(iface)
+        self._clone_portal.on_log = lambda m: self.bridge.cp_log.emit(m)
+        self._clone_portal.on_error = lambda m: self.bridge.cp_log.emit(f"[!] {m}")
+
+        ok = self._clone_portal.load_custom_html_file(path)
+        if ok:
+            self.cp_file_status.setText("✅ Archivo cargado correctamente")
+            self.cp_file_status.setStyleSheet("color: #00ff88;")
+            self.bridge.cp_log.emit(f"[+] Plantilla cargada desde {path}")
+        else:
+            self.cp_file_status.setText("❌ Error al cargar el archivo. Revisa el log.")
+            self.cp_file_status.setStyleSheet("color: #ff4444;")
+            self._clone_portal = None
+
     def _on_cp_start_clicked(self):
         iface = self.cp_iface_combo.currentText()
         if not iface:
@@ -699,7 +770,8 @@ class WireTrap(QMainWindow):
         if template == "custom":
             if not hasattr(self, "_clone_portal") or not self._clone_portal or not self._clone_portal.custom_html:
                 QMessageBox.warning(self, "Plantilla no lista",
-                                    "Primero debes clonar la plantilla usando el botón '🔗 Clonar Plantilla'.")
+                                    "Primero debes clonar una URL ('🔗 Clonar Plantilla') o "
+                                    "cargar un archivo HTML propio ('📁 Seleccionar archivo...').")
                 return
 
         # Limpiar tablas previas

