@@ -1794,7 +1794,14 @@ class WireTrap(QMainWindow):
                 security=et_security,
                 out_interface=iface_out,
                 wpa_passphrase=wpa_pass or "wiretrap123",
-                target_bssid=self.selected_ap.bssid
+                # Natural Roaming Mode: NO clonamos el BSSID real. Clonar la
+                # MAC exacta del AP legitimo hace que iOS/Android pongan ese
+                # BSSID en cuarentena unos segundos tras recibir el deauth,
+                # y no vuelven a asociarse a el aunque reaparezca con buena
+                # senal. Dejando la MAC nativa de la antena, el dispositivo
+                # lo trata como un nodo distinto del mismo SSID y conecta sin
+                # problema una vez el AP real queda silenciado por el deauth.
+                target_bssid=None
             )
 
             if self.evil_twin.running:
