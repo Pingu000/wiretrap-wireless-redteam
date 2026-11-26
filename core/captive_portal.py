@@ -903,11 +903,18 @@ class CaptivePortal:
         self._log("hostapd.conf → " + self._hostapd_conf)
 
     def _write_dnsmasq_conf(self):
+        # except-interface=lo es imprescindible: aunque se indique interface=X
+        # + bind-interfaces, dnsmasq SIEMPRE intenta escuchar tambien en
+        # loopback (127.0.0.1) por defecto para su propio uso interno. Si
+        # systemd-resolved, NetworkManager u otro dnsmasq ya ocupan el 53 en
+        # loopback, dnsmasq muere al arrancar con "Address already in use"
+        # aunque el resto de la config sea correcta.
         if self.dns_spoof_domains:
             target = self.dns_spoof_target_ip or GATEWAY_IP
             conf = (
                 "interface=" + self.interface + "\n"
                 "bind-interfaces\n"
+                "except-interface=lo\n"
                 "dhcp-range=" + DHCP_START + "," + DHCP_END + "," + SUBNET_MASK + ",5m\n"
                 "dhcp-option=3," + GATEWAY_IP + "\n"
                 "dhcp-option=6," + GATEWAY_IP + "\n"
@@ -929,6 +936,7 @@ class CaptivePortal:
             conf = (
                 "interface=" + self.interface + "\n"
                 "bind-interfaces\n"
+                "except-interface=lo\n"
                 "dhcp-range=" + DHCP_START + "," + DHCP_END + "," + SUBNET_MASK + ",5m\n"
                 "dhcp-option=3," + GATEWAY_IP + "\n"
                 "dhcp-option=6," + GATEWAY_IP + "\n"

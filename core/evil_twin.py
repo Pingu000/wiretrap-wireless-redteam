@@ -128,8 +128,14 @@ auth_algs=1
 
     def _write_dnsmasq_conf(self, upstream_dns="8.8.8.8"):
         """Genera el archivo de configuración de dnsmasq"""
+        # except-interface=lo es imprescindible: aunque se indique interface=X
+        # + bind-interfaces, dnsmasq SIEMPRE intenta escuchar tambien en
+        # loopback (127.0.0.1) por defecto. Si systemd-resolved, NetworkManager
+        # u otro dnsmasq ya ocupan el 53 en loopback, dnsmasq muere al arrancar
+        # con "Address already in use" aunque el resto de la config sea correcta.
         conf = f"""interface={self.ap_iface}
 bind-interfaces
+except-interface=lo
 dhcp-range={self.dhcp_start},{self.dhcp_end},{self.subnet},12h
 dhcp-option=3,{self.gateway_ip}
 dhcp-option=6,{self.gateway_ip}
