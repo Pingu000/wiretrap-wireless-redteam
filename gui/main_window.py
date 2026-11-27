@@ -1575,6 +1575,11 @@ class WireTrap(QMainWindow):
                 ap = self.scanner.aps.get(bssid_item.text())
                 if not ap:
                     continue
+                # SSID puede pasar de "<hidden>" al nombre real si llega un
+                # Probe Response que lo revela (ver core/scanner.py).
+                ssid_item = table.item(row, 0)
+                if ssid_item and ap.ssid and ssid_item.text() != ap.ssid:
+                    ssid_item.setText(ap.ssid)
                 signal_item = table.item(row, 4)
                 if signal_item:
                     signal_item.setText(f"{ap.signal} dBm")

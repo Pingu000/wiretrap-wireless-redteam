@@ -220,6 +220,23 @@ class Scanner:
                 self.aps[bssid].pmf_capable = pmf_capable
                 self.aps[bssid].pmf_required = pmf_required
 
+        elif packet.haslayer(Dot11ProbeResp):
+            # Desocultar SSIDs ocultos: un AP que oculta el SSID en el
+            # beacon lo revela igualmente en el Probe Response cuando un
+            # cliente que YA conoce la red le pregunta directamente por
+            # ella -- el AP tiene que identificarse para dejarle conectar.
+            # Si ese BSSID ya lo tenemos como "<hidden>", lo actualizamos
+            # con el SSID real en cuanto aparece.
+            bssid = packet[Dot11].addr2
+            if not bssid or bssid not in self.aps:
+                return
+            try:
+                revealed_ssid = packet[Dot11Elt].info.decode("utf-8", errors="ignore")
+            except Exception:
+                revealed_ssid = ""
+            if revealed_ssid and self.aps[bssid].ssid in ("", "<hidden>"):
+                self.aps[bssid].ssid = revealed_ssid
+
         elif packet.haslayer(Dot11) and packet.type == 2:
             ds = packet.FCfield & 0x3
             src = packet[Dot11].addr2
