@@ -39,6 +39,7 @@ class SignalBridge(QObject):
     wpa2_log_message = pyqtSignal(str)
     flood_beacon_sent = pyqtSignal(int)
     flood_stopped    = pyqtSignal()
+    flood_error      = pyqtSignal(str)
     cp_log           = pyqtSignal(str)
     cp_credential    = pyqtSignal(object)   # dict
     cp_sniff_data    = pyqtSignal(object)   # CapturedData post-login
@@ -90,6 +91,7 @@ class WireTrap(QMainWindow):
         self.bridge.wpa2_log_message.connect(self.log_wpa2)
         self.bridge.flood_beacon_sent.connect(self._on_flood_beacon_sent)
         self.bridge.flood_stopped.connect(self._on_flood_stopped)
+        self.bridge.flood_error.connect(lambda msg: self._flood_log(f"[!] {msg}"))
         self.bridge.cp_log.connect(self._on_cp_log)
         self.bridge.cp_clone_ok.connect(self._on_clone_success)
         self.bridge.cp_clone_fail.connect(self._on_clone_error)
@@ -1003,7 +1005,7 @@ class WireTrap(QMainWindow):
         self.flooder.on_beacon_sent = lambda c: self.bridge.flood_beacon_sent.emit(c)
         self.flooder.on_stopped = lambda: self.bridge.flood_stopped.emit()
         if hasattr(self.flooder, 'on_error'):
-            self.flooder.on_error = lambda msg: self._flood_log(f"[!] {msg}")
+            self.flooder.on_error = lambda msg: self.bridge.flood_error.emit(msg)
 
         self.flooder.start(
             channel=channel,
