@@ -258,8 +258,6 @@ class Scanner:
             if client_mac not in self.clients:
                 client = Client(client_mac, ap_bssid, signal)
                 self.clients[client_mac] = client
-                if ap_bssid in self.aps:
-                    self.aps[ap_bssid].clients.add(client_mac)
                 if self.on_client_found:
                     self.on_client_found(client)
             else:
@@ -270,8 +268,18 @@ class Scanner:
                     if old_bssid in self.aps:
                         self.aps[old_bssid].clients.discard(client_mac)
                     client.bssid = ap_bssid
-                    if ap_bssid in self.aps:
-                        self.aps[ap_bssid].clients.add(client_mac)
+
+            # Vincular SIEMPRE el cliente a su AP, no solo al verlo por
+            # primera vez o al detectar un cambio de BSSID: si el beacon
+            # del AP aun no se habia capturado cuando vimos el primer data
+            # frame del cliente, "ap_bssid in self.aps" daba False en ese
+            # momento y la asociacion se perdia para siempre -- el AP se
+            # quedaba con 0 clientes aunque hubiera trafico real. Repetir
+            # esta comprobacion en cada data frame la "sana" en cuanto el
+            # beacon aparece, y un set.add() repetido no hace nada si ya
+            # estaba vinculado.
+            if ap_bssid in self.aps:
+                self.aps[ap_bssid].clients.add(client_mac)
 
         elif (packet.haslayer(Dot11) and
               packet.type == 0 and
