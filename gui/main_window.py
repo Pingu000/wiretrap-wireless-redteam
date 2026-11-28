@@ -1114,13 +1114,22 @@ class WireTrap(QMainWindow):
         ap_group.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
         ap_layout = QVBoxLayout(ap_group)
         self.ap_table = QTableWidget()
-        self.ap_table.setColumnCount(6)
+        self.ap_table.setColumnCount(5)
         self.ap_table.setHorizontalHeaderLabels(
-            ["SSID", "BSSID", "Canal", "Seguridad", "Señal", "Clientes"]
+            ["SSID", "BSSID", "Canal", "Seguridad", "Señal"]
         )
         self.ap_table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch
         )
+        # Canal/Seguridad/Señal con ancho fijo y moderado para que SSID y
+        # BSSID (las columnas 0 y 1, en Stretch) se queden con el resto del
+        # espacio y se vean completos.
+        self.ap_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self.ap_table.setColumnWidth(2, 70)
+        self.ap_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self.ap_table.setColumnWidth(3, 110)
+        self.ap_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self.ap_table.setColumnWidth(4, 90)
         self.ap_table.horizontalHeader().setFont(header_font)
         self.ap_table.horizontalHeader().setMinimumHeight(34)
         self.ap_table.verticalHeader().setVisible(False)
@@ -1528,7 +1537,7 @@ class WireTrap(QMainWindow):
 
         values = [
             ap.ssid, ap.bssid, str(ap.channel),
-            ap.security, f"{ap.signal} dBm", str(len(ap.clients))
+            ap.security, f"{ap.signal} dBm"
         ]
 
         for col, val in enumerate(values):
@@ -1548,22 +1557,6 @@ class WireTrap(QMainWindow):
     def _on_client_found(self, client: Client):
         if self.selected_ap and client.bssid == self.selected_ap.bssid:
             self._add_client_row(client)
-
-        def _update_count(table):
-            if not getattr(self, table, None): return
-            t = getattr(self, table)
-            for row in range(t.rowCount()):
-                bssid_item = t.item(row, 1)
-                if bssid_item and bssid_item.text() == client.bssid:
-                    ap = self.scanner.aps.get(client.bssid)
-                    if ap:
-                        count_item = QTableWidgetItem(str(len(ap.clients)))
-                        count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        t.setItem(row, 5, count_item)
-                    break
-
-        _update_count('ap_table')
-        _update_count('wpa2_ap_table')
 
     def _add_client_row(self, client: Client):
         row = self.client_table.rowCount()
@@ -1594,9 +1587,6 @@ class WireTrap(QMainWindow):
                 signal_item = table.item(row, 4)
                 if signal_item:
                     signal_item.setText(f"{ap.signal} dBm")
-                count_item = table.item(row, 5)
-                if count_item:
-                    count_item.setText(str(len(ap.clients)))
 
         _update_table(self.ap_table)
         if hasattr(self, 'wpa2_ap_table'):
@@ -1867,9 +1857,18 @@ class WireTrap(QMainWindow):
         ap_group.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
         ap_layout = QVBoxLayout(ap_group)
         self.wpa2_ap_table = QTableWidget()
-        self.wpa2_ap_table.setColumnCount(6)
-        self.wpa2_ap_table.setHorizontalHeaderLabels(["SSID", "BSSID", "Canal", "Seguridad", "Señal", "Clientes"])
+        self.wpa2_ap_table.setColumnCount(5)
+        self.wpa2_ap_table.setHorizontalHeaderLabels(["SSID", "BSSID", "Canal", "Seguridad", "Señal"])
         self.wpa2_ap_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # Canal/Seguridad/Señal con ancho fijo y moderado para que SSID y
+        # BSSID (columnas 0 y 1, en Stretch) se queden con el resto del
+        # espacio y se vean completos.
+        self.wpa2_ap_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self.wpa2_ap_table.setColumnWidth(2, 70)
+        self.wpa2_ap_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        self.wpa2_ap_table.setColumnWidth(3, 110)
+        self.wpa2_ap_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
+        self.wpa2_ap_table.setColumnWidth(4, 90)
         self.wpa2_ap_table.horizontalHeader().setFont(header_font)
         self.wpa2_ap_table.horizontalHeader().setMinimumHeight(34)
         self.wpa2_ap_table.verticalHeader().setVisible(False)
