@@ -186,9 +186,9 @@ class WireTrap(QMainWindow):
         btn_captive.setStyleSheet("background-color: #1a1100; border: 2px solid #ff8800; color: white;")
         btn_captive.clicked.connect(lambda: self.stack.setCurrentIndex(4))
 
-        grid.addWidget(btn_deauth_et, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_pmkid, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_flood, alignment=Qt.AlignmentFlag.AlignCenter)
+        grid.addWidget(btn_deauth_et, alignment=Qt.AlignmentFlag.AlignCenter)
         grid.addWidget(btn_captive, alignment=Qt.AlignmentFlag.AlignCenter)
 
         layout.addLayout(grid)
