@@ -18,7 +18,7 @@ class DashboardDialog(QDialog):
         else:
             _title = "Dashboard Global"
         self.setWindowTitle(_title)
-        self.setMinimumSize(950, 600)
+        self.setMinimumSize(950, 760)
         self.setStyleSheet("""
             QDialog { background: #0a0a0a; border: 2px solid #00aa44; border-radius: 8px; }
             QLabel { color: #00ff88; font-family: Monospace; font-weight: bold; font-size: 11pt; }

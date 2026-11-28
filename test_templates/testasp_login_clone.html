@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>acuforum - TEST and Demonstration site for Acunetix Web Vulnerability Scanner</title>
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        background: #ffffff;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 14px;
+        color: #000000;
+    }
+    .topbar {
+        background: #0a8a0a;
+        color: #ffffff;
+        padding: 10px 16px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .topbar .logo {
+        background: #000000;
+        color: #ffffff;
+        font-weight: bold;
+        padding: 4px 10px;
+        border-radius: 3px;
+        white-space: nowrap;
+    }
+    .topbar .logo span { color: #e03030; }
+    .topbar .forumtag {
+        background: #ffffff;
+        color: #0a8a0a;
+        font-weight: bold;
+        padding: 4px 10px;
+        border-radius: 3px;
+        white-space: nowrap;
+    }
+    .topbar .title {
+        flex: 1;
+        text-align: right;
+        font-size: 15px;
+    }
+    .topbar .title a { color: #ffffff; text-decoration: underline; }
+
+    .navbar {
+        background: #ccffcc;
+        padding: 8px 16px;
+        border-bottom: 1px solid #0a8a0a;
+    }
+    .navbar a {
+        color: #0a6a0a;
+        text-decoration: none;
+        margin-right: 6px;
+    }
+    .navbar a:hover { text-decoration: underline; }
+
+    .loginwrap {
+        display: flex;
+        justify-content: center;
+        margin: 40px 0 10px 0;
+    }
+    .loginbox {
+        background: #ccffcc;
+        border: 1px solid #0a8a0a;
+        padding: 14px 16px;
+        width: 320px;
+    }
+    .loginbox table { width: 100%; border-collapse: collapse; }
+    .loginbox td { padding: 4px 0; }
+    .loginbox input[type=text],
+    .loginbox input[type=password] {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 3px 4px;
+        border: 1px solid #0a8a0a;
+    }
+    .loginbox .btnrow { text-align: right; padding-top: 6px; }
+    .loginbox button {
+        background: #2a7fff;
+        color: #ffffff;
+        border: 1px solid #1a5fcc;
+        padding: 3px 14px;
+        cursor: pointer;
+    }
+
+    .copyright {
+        text-align: right;
+        color: #0a8a0a;
+        font-size: 11px;
+        margin-right: 20px;
+    }
+
+    .warningbox {
+        background: #d9d9d9;
+        margin: 30px auto;
+        padding: 24px 40px;
+        max-width: 620px;
+        text-align: center;
+        line-height: 1.5;
+    }
+</style>
+</head>
+<body>
+
+    <div class="topbar">
+        <span class="logo">ac<span>u</span>netix</span>
+        <span class="forumtag">acuforum</span>
+        <span class="title">TEST and Demonstration site for
+            <a href="#">Acunetix Web Vulnerability Scanner</a>
+        </span>
+    </div>
+
+    <div class="navbar">
+        about&nbsp;&nbsp;-&nbsp;&nbsp;
+        forums&nbsp;&nbsp;-&nbsp;&nbsp;
+        search&nbsp;&nbsp;-&nbsp;&nbsp;
+        login&nbsp;&nbsp;-&nbsp;&nbsp;
+        register&nbsp;&nbsp;-&nbsp;&nbsp;
+        SQL scanner&nbsp;&nbsp;-&nbsp;&nbsp;
+        SQL vuln help
+    </div>
+
+    <div class="loginwrap">
+        <div class="loginbox">
+            <form method="POST" action="/login">
+                <table>
+                    <tr>
+                        <td>Username:</td>
+                        <td><input type="text" name="tfUName" autocomplete="off"></td>
+                    </tr>
+                    <tr>
+                        <td>Password:</td>
+                        <td><input type="password" name="tfUPass" autocomplete="off"></td>
+                    </tr>
+                </table>
+                <div class="btnrow">
+                    <button type="submit">Login</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="copyright">Copyright 2019 Acunetix Ltd.</div>
+
+    <div class="warningbox">
+        <b>Warning</b>: This forum is deliberately vulnerable to SQL Injections,
+        directory traversal, and other web-based attacks. It is built using ASP
+        and it is here to help you test Acunetix. The entire content of the forum
+        is erased daily. All the posts are real-life examples of how attackers
+        are trying to break into insecure web applications. Please be careful and
+        do not follow links that are posted by malicious parties.
+    </div>
+
+</body>
+</html>

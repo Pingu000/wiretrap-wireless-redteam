@@ -340,7 +340,7 @@ class WireTrap(QMainWindow):
         # queda un boton para abrirlo + una etiqueta de estado.
         self.dns_spoof_dialog = QDialog(self)
         self.dns_spoof_dialog.setWindowTitle("Configurar DNS Spoofing por dominio")
-        self.dns_spoof_dialog.setMinimumSize(540, 440)
+        self.dns_spoof_dialog.setMinimumSize(540, 620)
         self.dns_spoof_dialog.setStyleSheet(
             "QDialog { background: #0d0d0d; }"
             "QLabel { color: #ff8800; }"
@@ -400,8 +400,9 @@ class WireTrap(QMainWindow):
         # Tabla: Dominio | Plantilla HTML
         self.dns_spoof_table = QTableWidget()
         self.dns_spoof_table.setColumnCount(2)
-        self.dns_spoof_table.setHorizontalHeaderLabels(["Dominio", "Plantilla HTML (opcional)"])
-        self.dns_spoof_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.dns_spoof_table.setHorizontalHeaderLabels(["Dominio", "Plantilla HTML"])
+        self.dns_spoof_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.dns_spoof_table.setColumnWidth(0, 300)
         self.dns_spoof_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.dns_spoof_table.setFont(QFont("Monospace", 9))
         self.dns_spoof_table.setRowCount(3)
