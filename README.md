@@ -68,18 +68,6 @@ qué técnica aplicar. Dos de las técnicas que puede recomendar (CTS Flood, Dow
 son aún teóricas y no tienen módulo de ataque implementado; las que sí están completamente
 implementadas son Deauth+Evil Twin y Beacon Flood.
 
-## Capturas
-
-**Menú principal** — los 4 módulos de ataque:
-
-![Menú principal de WireTrap](docs/screenshots/menu-principal.png)
-
-**Captive Portal** — configuración del AP falso, plantilla de login (Google o HTML propio),
-DNS Spoofing por dominio, y paneles en vivo de credenciales capturadas, tráfico post-login y
-log del ataque:
-
-![Módulo Captive Portal de WireTrap](docs/screenshots/captive-portal.png)
-
 ## Project Structure
 
 ```
