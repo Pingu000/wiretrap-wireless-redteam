@@ -1,110 +1,122 @@
 # WireTrap — Wireless Red Team Framework
 
-Framework modular de auditoría ofensiva WiFi con interfaz gráfica (PyQt6), pensado para
-practicar reconocimiento, explotación y post-explotación sobre redes propias o expresamente
-autorizadas: desde el escaneo pasivo con recomendación automática de técnica, hasta el
-cracking de PMKID/handshakes WPA2, la saturación de APs, un Evil Twin con Internet real para
-la víctima y un captive portal de phishing de credenciales con DNS Spoofing dirigido a
-dominios concretos.
+Modular offensive WiFi auditing framework with a graphical interface (PyQt6), built for
+practicing reconnaissance, exploitation and post-exploitation against your own or explicitly
+authorized networks: from passive scanning with automatic technique recommendation, to
+WPA2 PMKID/handshake cracking, AP saturation, an Evil Twin with real Internet for the victim,
+and a credential-phishing captive portal with DNS Spoofing targeted at specific domains.
 
-> ⚠️ Herramienta para uso exclusivo en entornos autorizados (tus propios dispositivos/redes
-> o con permiso explícito). El autor no se responsabiliza de ningún uso indebido.
+> ⚠️ This tool is intended for authorized environments only (your own devices/networks, or
+> with explicit permission). The author is not responsible for any misuse.
 
 ## Tech Stack
 
 - **OS:** Kali Linux
-- **Lenguaje:** Python 3
+- **Language:** Python 3
 - **GUI:** PyQt6
-- **Captura/inyección 802.11:** Scapy
-- **AP falso:** hostapd + dnsmasq
-- **Saturación de espectro:** mdk4 (Beacon Flood)
-- **PMKID / 4-way handshake:** hcxdumptool (PMKID sin clientes), airodump-ng (handshake
-  clásico), hcxpcapngtool (conversión a `.hc22000`), hashcat (cracking por diccionario)
-- **Servidor del portal cautivo:** Flask
-- **Adaptación de plantillas HTML:** BeautifulSoup4
-- **Interceptación HTTPS tras login (opcional):** mitmproxy + certificado CA propio
+- **802.11 capture/injection:** Scapy
+- **Fake AP:** hostapd + dnsmasq
+- **Spectrum saturation:** mdk4 (Beacon Flood)
+- **PMKID / 4-way handshake:** hcxdumptool (PMKID without connected clients), airodump-ng
+  (classic handshake capture), hcxpcapngtool (conversion to `.hc22000`), hashcat (dictionary
+  cracking)
+- **Captive portal server:** Flask
+- **HTML template adaptation:** BeautifulSoup4
+- **Post-login HTTPS interception (optional):** mitmproxy + custom CA certificate
   (`cryptography` / `pyOpenSSL`)
-- **Red/firewall:** iptables (NAT + DNAT del portal cautivo, exención post-login)
-- **Hardware probado:** Alfa AWUS036ACH v2 (RTL8812AU) en modo AP + Alfa AWUS036ACHM
-  (MT7610U) en modo monitor. Las interfaces se eligen desde la GUI, así que cualquier
-  adaptador compatible con modo monitor + modo AP debería servir.
+- **Networking/firewall:** iptables (captive portal NAT + DNAT, post-login exemption)
+- **Hardware tested with:** Alfa AWUS036ACH v2 (RTL8812AU) in AP mode + Alfa AWUS036ACHM
+  (MT7610U) in monitor mode. Interfaces are selected from the GUI, so any adapter that
+  supports both monitor mode and AP mode should work.
 
-### Dependencias Python
+### Python dependencies
 
 ```bash
 pip3 install PyQt6 scapy flask beautifulsoup4 cryptography pyOpenSSL requests --break-system-packages
 ```
 
-### Dependencias del sistema (Kali)
+### System dependencies (Kali)
 
 ```bash
 sudo apt install hostapd dnsmasq mdk4 aircrack-ng hcxtools hashcat
-# Opcional, solo para la interceptación HTTPS del Captive Portal:
+# Optional, only needed for the Captive Portal's HTTPS interception:
 pip3 install mitmproxy --break-system-packages
 ```
 
-## Módulos
+## Modules
 
-El menú principal da acceso a 4 módulos independientes:
+The main menu gives access to 4 independent modules:
 
-1. **🔒 Criptografía WPA2 (PMKID/Handshakes)** — ataque PMKID sin necesidad de clientes
-   conectados (hcxdumptool) o captura de handshake clásica (airodump-ng), conversión a
-   `.hc22000` y cracking por diccionario con hashcat.
-2. **📡 Beacon Flood** — inunda el entorno con cientos de SSIDs falsos vía mdk4, con opción
-   de anunciarlos como redes WPA2 (🔒) para mayor realismo.
-3. **💥 Deauth + Evil Twin** — desautenticación continua suplantando al AP legítimo, Evil
-   Twin (hostapd + dnsmasq + NAT) con Internet real para la víctima, y sniffer de
-   tráfico/credenciales en vivo por cliente conectado (doble clic sobre el cliente abre su
+1. **🔒 WPA2 Cryptography (PMKID/Handshakes)** — PMKID attack without needing connected
+   clients (hcxdumptool), or classic handshake capture (airodump-ng), conversion to
+   `.hc22000`, and dictionary cracking with hashcat.
+2. **📡 Beacon Flood** — floods the environment with hundreds of fake SSIDs via mdk4, with
+   the option to announce them as WPA2 networks (🔒) for extra realism.
+3. **💥 Deauth + Evil Twin** — continuous deauthentication impersonating the legitimate AP,
+   an Evil Twin (hostapd + dnsmasq + NAT) with real Internet for the victim, and a live
+   traffic/credential sniffer per connected client (double-click a client to open its
    dashboard).
-4. **🎣 Captive Portal** — portal cautivo con plantilla de login (Google o HTML propio),
-   sniffer de credenciales por IP víctima (doble clic abre su dashboard), y **DNS Spoofing
-   por dominio**: sirve una página propia cuando la víctima visita un dominio concreto,
-   manteniendo ese dominio en la barra de direcciones. Por diseño (HSTS + validación de
-   certificado) solo es viable contra dominios en **HTTP puro**, no HTTPS real.
+4. **🎣 Captive Portal** — captive portal with a login template (Google style or a custom
+   HTML file), a credential sniffer per victim IP (double-click to open its dashboard), and
+   **DNS Spoofing by domain**: serves a page of your own when the victim visits a specific
+   domain, while that domain stays in the address bar. By design (HSTS + certificate
+   validation) this is only viable against **plain-HTTP** domains, not real HTTPS.
 
-El motor de decisión (`core/decision_engine.py`) es un sistema de reglas (sin IA/ML) que,
-a partir del perfil de seguridad detectado en el escaneo (OPEN/WEP/WPA/WPA2/WPA3), recomienda
-qué técnica aplicar. Dos de las técnicas que puede recomendar (CTS Flood, Downgrade Attack)
-son aún teóricas y no tienen módulo de ataque implementado; las que sí están completamente
-implementadas son Deauth+Evil Twin y Beacon Flood.
+The decision engine (`core/decision_engine.py`) is a rule-based system (no AI/ML) that, based
+on the security profile detected during the scan (OPEN/WEP/WPA/WPA2/WPA3), recommends which
+technique to apply. Two of the techniques it can recommend (CTS Flood, Downgrade Attack) are
+still theoretical and have no implemented attack module; the ones that are fully implemented
+are Deauth+Evil Twin and Beacon Flood.
+
+## Screenshots
+
+**Main menu** — the 4 attack modules:
+
+![WireTrap main menu](docs/screenshots/menu-principal.png)
+
+**Captive Portal** — fake AP configuration, login template (Google or custom HTML), DNS
+Spoofing by domain, and live panels for captured credentials, post-login traffic, and the
+attack log:
+
+![WireTrap Captive Portal module](docs/screenshots/captive-portal.png)
 
 ## Project Structure
 
 ```
 WireTrap/
-├── main.py                        # Entry point — comprueba root, lanza la GUI
+├── main.py                        # Entry point — checks root, launches the GUI
 ├── core/
-│   ├── scanner.py                 # Escaneo pasivo 802.11, channel hopping, detección de clientes
-│   ├── decision_engine.py         # Motor de decisión por reglas según perfil del AP
-│   ├── deauth.py                  # Deauth loop vía Scapy
-│   ├── evil_twin.py               # hostapd + dnsmasq + NAT (Internet real para la víctima)
-│   ├── beacon_flood.py            # Saturación de APs vía mdk4
+│   ├── scanner.py                 # Passive 802.11 scan, channel hopping, client detection
+│   ├── decision_engine.py         # Rule-based decision engine by AP security profile
+│   ├── deauth.py                  # Deauth loop via Scapy
+│   ├── evil_twin.py               # hostapd + dnsmasq + NAT (real Internet for the victim)
+│   ├── beacon_flood.py            # AP saturation via mdk4
 │   ├── wpa2_crypto.py             # PMKID / handshake / hashcat (hcxdumptool, hcxpcapngtool, hashcat)
-│   └── captive_portal.py          # Servidor Flask del portal, plantillas, DNS Spoofing por dominio, MITM opcional
+│   └── captive_portal.py          # Portal's Flask server, templates, DNS Spoofing by domain, optional MITM
 ├── post_exploitation/
-│   └── sniffer.py                 # Captura HTTP en vivo: credenciales, cookies, DNS, hosts visitados
-├── reporting/                     # Pendiente: generador de informe PDF
+│   └── sniffer.py                 # Live HTTP capture: credentials, cookies, DNS, visited hosts
+├── reporting/                     # Pending: PDF report generator
 ├── gui/
-│   ├── main_window.py             # Ventana principal PyQt6 (los 4 módulos)
-│   └── dashboard_dialog.py        # Dashboard de tráfico/credenciales por cliente víctima
+│   ├── main_window.py             # Main PyQt6 window (the 4 modules)
+│   └── dashboard_dialog.py        # Per-victim-client traffic/credentials dashboard
 ├── utils/
-│   └── oui_lookup.py              # Resolución de fabricante por MAC (con caché)
-└── test_templates/                # Plantillas HTML de prueba para Captive Portal / DNS Spoofing
+│   └── oui_lookup.py              # MAC vendor lookup (with cache)
+└── test_templates/                # Test HTML templates for Captive Portal / DNS Spoofing
 ```
 
 ## Status
 
-- [x] Escaneo pasivo con corrección de señal (`_get_signal`) y detección por probe requests
-- [x] Motor de decisión por reglas (OPEN/WEP/WPA/WPA2/WPA3)
-- [x] Deauth + Evil Twin con Internet real (NAT/iptables)
-- [x] Beacon Flood vía mdk4 (con anuncio WPA2 opcional)
-- [x] PMKID / Handshake / hashcat pipeline completo
-- [x] Captive Portal con plantilla Google o HTML propio
-- [x] DNS Spoofing por dominio (plantilla HTML propia por dominio, limitado a HTTP puro)
-- [x] Sniffer de credenciales/cookies en vivo, con dashboard por cliente (Evil Twin y Captive Portal)
-- [x] Interceptación HTTPS post-login vía mitmproxy + CA propio (opcional)
-- [ ] Generador de informe PDF (`reporting/`)
-- [ ] CTS Flood / Downgrade Attack (recomendados por el motor de decisión, sin implementar)
+- [x] Passive scan with signal fix (`_get_signal`) and probe-request-based detection
+- [x] Rule-based decision engine (OPEN/WEP/WPA/WPA2/WPA3)
+- [x] Deauth + Evil Twin with real Internet (NAT/iptables)
+- [x] Beacon Flood via mdk4 (with optional WPA2 announcement)
+- [x] Full PMKID / Handshake / hashcat pipeline
+- [x] Captive Portal with Google or custom HTML template
+- [x] DNS Spoofing by domain (custom HTML template per domain, limited to plain HTTP)
+- [x] Live credential/cookie sniffer, with per-client dashboard (Evil Twin and Captive Portal)
+- [x] Post-login HTTPS interception via mitmproxy + custom CA (optional)
+- [ ] PDF report generator (`reporting/`)
+- [ ] CTS Flood / Downgrade Attack (recommended by the decision engine, not implemented)
 
 ## Usage
 
@@ -112,6 +124,6 @@ WireTrap/
 sudo python3 main.py
 ```
 
-Requiere privilegios de root (modo monitor, hostapd/dnsmasq, iptables) y, para el flujo
-completo de Evil Twin/Captive Portal, dos interfaces WiFi: una en modo monitor (recon/deauth)
-y otra en modo AP (para levantar la red falsa).
+Requires root privileges (monitor mode, hostapd/dnsmasq, iptables) and, for the full Evil
+Twin/Captive Portal flow, two WiFi interfaces: one in monitor mode (recon/deauth) and one in
+AP mode (to bring up the fake network).
