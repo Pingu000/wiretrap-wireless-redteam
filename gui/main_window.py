@@ -353,18 +353,54 @@ class WireTrap(QMainWindow):
         self.chk_dns_spoof.setStyleSheet("color: #ff8800;")
         dns_inner.addWidget(self.chk_dns_spoof)
 
+        # Todo lo que solo tiene sentido con el toggle activado va en un
+        # contenedor aparte: así, al estar desactivado, se oculta en bloque
+        # de una vez (antes, al ocultar cada widget suelto por separado, el
+        # layout dejaba huecos raros y el checkbox quedaba descolocado).
+        dns_content = QWidget()
+        dns_content_layout = QVBoxLayout(dns_content)
+        dns_content_layout.setContentsMargins(0, 0, 0, 0)
+        dns_content_layout.setSpacing(8)
+
         dns_hint = QLabel(
-            "Por cada dominio, indica la URL de login a clonar (opcional).\n"
-            "Si dejas la URL vacía, muestra el captive portal genérico."
+            "Por cada dominio, puedes seleccionar un HTML propio como\n"
+            "plantilla (opcional). Si no seleccionas ninguno, se muestra\n"
+            "el captive portal genérico."
         )
         dns_hint.setFont(QFont("Monospace", 9))
         dns_hint.setStyleSheet("color: #888888;")
-        dns_inner.addWidget(dns_hint)
+        dns_content_layout.addWidget(dns_hint)
 
-        # Tabla: Dominio | URL a clonar
+        def _make_dns_html_picker():
+            """Boton por fila para elegir un .html propio como plantilla de
+            ese dominio, igual que 'Personalizada (archivo HTML)' arriba --
+            sustituye al clonado por URL, que ya sabiamos poco fiable."""
+            btn = QPushButton("📁 Seleccionar HTML...")
+            btn.setFont(QFont("Monospace", 8))
+            btn.setStyleSheet(
+                "QPushButton { background: #1a0a00; color: #ff8800; border: 1px solid #553300; }"
+                "QPushButton:hover { background: #2a1400; }"
+            )
+            btn.html_path = ""
+
+            def _pick():
+                path, _ = QFileDialog.getOpenFileName(
+                    self, "Seleccionar plantilla HTML para este dominio", "",
+                    "Archivos HTML (*.html *.htm);;Todos los archivos (*)"
+                )
+                if not path:
+                    return
+                btn.html_path = path
+                btn.setText("✓ " + os.path.basename(path))
+                btn.setToolTip(path)
+
+            btn.clicked.connect(_pick)
+            return btn
+
+        # Tabla: Dominio | Plantilla HTML
         self.dns_spoof_table = QTableWidget()
         self.dns_spoof_table.setColumnCount(2)
-        self.dns_spoof_table.setHorizontalHeaderLabels(["Dominio", "URL a clonar (opcional)"])
+        self.dns_spoof_table.setHorizontalHeaderLabels(["Dominio", "Plantilla HTML (opcional)"])
         self.dns_spoof_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.dns_spoof_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.dns_spoof_table.setFont(QFont("Monospace", 9))
@@ -375,8 +411,8 @@ class WireTrap(QMainWindow):
         )
         for row in range(3):
             self.dns_spoof_table.setItem(row, 0, QTableWidgetItem(""))
-            self.dns_spoof_table.setItem(row, 1, QTableWidgetItem(""))
-        dns_inner.addWidget(self.dns_spoof_table, 1)
+            self.dns_spoof_table.setCellWidget(row, 1, _make_dns_html_picker())
+        dns_content_layout.addWidget(self.dns_spoof_table, 1)
 
         dns_btn_row = QHBoxLayout()
         btn_dns_add = QPushButton("+ Añadir fila")
@@ -398,7 +434,7 @@ class WireTrap(QMainWindow):
             r = self.dns_spoof_table.rowCount()
             self.dns_spoof_table.insertRow(r)
             self.dns_spoof_table.setItem(r, 0, QTableWidgetItem(""))
-            self.dns_spoof_table.setItem(r, 1, QTableWidgetItem(""))
+            self.dns_spoof_table.setCellWidget(r, 1, _make_dns_html_picker())
             self._update_dns_spoof_status_label()
 
         def _dns_del_row():
@@ -412,7 +448,7 @@ class WireTrap(QMainWindow):
         dns_btn_row.addWidget(btn_dns_add)
         dns_btn_row.addWidget(btn_dns_del)
         dns_btn_row.addStretch()
-        dns_inner.addLayout(dns_btn_row)
+        dns_content_layout.addLayout(dns_btn_row)
 
         dns_ip_row = QHBoxLayout()
         dns_ip_lbl = QLabel("IP destino (tu máquina):")
@@ -427,22 +463,15 @@ class WireTrap(QMainWindow):
         dns_ip_row.addWidget(dns_ip_lbl)
         dns_ip_row.addWidget(self.dns_target_ip)
         dns_ip_row.addStretch()
-        dns_inner.addLayout(dns_ip_row)
+        dns_content_layout.addLayout(dns_ip_row)
 
-        dns_hint.setVisible(False)
-        self.dns_spoof_table.setVisible(False)
-        btn_dns_add.setVisible(False)
-        btn_dns_del.setVisible(False)
-        dns_ip_lbl.setVisible(False)
-        self.dns_target_ip.setVisible(False)
+        dns_inner.addWidget(dns_content, 1)
+        dns_inner.addStretch()
+
+        dns_content.setVisible(False)
 
         def _on_dns_spoof_toggled(checked):
-            dns_hint.setVisible(checked)
-            self.dns_spoof_table.setVisible(checked)
-            btn_dns_add.setVisible(checked)
-            btn_dns_del.setVisible(checked)
-            dns_ip_lbl.setVisible(checked)
-            self.dns_target_ip.setVisible(checked)
+            dns_content.setVisible(checked)
             self._update_dns_spoof_status_label()
 
         self.chk_dns_spoof.toggled.connect(_on_dns_spoof_toggled)
@@ -788,9 +817,7 @@ class WireTrap(QMainWindow):
             spoof_entries = []
             for row in range(self.dns_spoof_table.rowCount()):
                 cell_domain = self.dns_spoof_table.item(row, 0)
-                cell_url    = self.dns_spoof_table.item(row, 1)
                 raw_domain  = cell_domain.text().strip() if cell_domain else ""
-                clone_url   = cell_url.text().strip()    if cell_url    else ""
                 if not raw_domain:
                     continue
                 domain = raw_domain.lower()
@@ -798,9 +825,11 @@ class WireTrap(QMainWindow):
                     if domain.startswith(prefix):
                         domain = domain[len(prefix):]
                 domain = domain.split("/")[0]
+                html_btn  = self.dns_spoof_table.cellWidget(row, 1)
+                html_file = getattr(html_btn, "html_path", "") if html_btn else ""
                 spoof_entries.append({
                     "domain":    domain,
-                    "clone_url": clone_url,
+                    "html_file": html_file,
                     "html":      ""
                 })
             target_ip = self.dns_target_ip.text().strip() or "10.0.0.1"
