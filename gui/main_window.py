@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QLabel, QComboBox, QHeaderView, QFrame, QSplitter,
     QTextEdit, QGroupBox, QMessageBox, QLineEdit,
     QStackedWidget, QCheckBox, QSlider, QAbstractItemView,
-    QFileDialog
+    QFileDialog, QDialog
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
 from PyQt6.QtGui import QColor, QFont
@@ -333,18 +333,23 @@ class WireTrap(QMainWindow):
         sep2.setStyleSheet("color: #333;")
         opts_layout.addWidget(sep2)
 
-        # ── DNS Spoofing ──────────────────────────────────────────
-        dns_group = QGroupBox("🌍 DNS SPOOFING POR DOMINIO")
-        dns_group.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
-        dns_group.setStyleSheet(
-            "QGroupBox { border: 1px solid #553300; border-radius: 4px; margin-top: 6px; padding-top: 4px; }"
-            "QGroupBox::title { color: #ff8800; subcontrol-origin: margin; left: 8px; }"
+        # ── DNS Spoofing: ahora vive en un dialogo aparte ──────────
+        # Con la ventana sin maximizar este panel (360px fijos) no tenia
+        # sitio para la tabla + botones + campo de IP sin solaparse, asi
+        # que todo el contenido se mueve a un QDialog propio, y aqui solo
+        # queda un boton para abrirlo + una etiqueta de estado.
+        self.dns_spoof_dialog = QDialog(self)
+        self.dns_spoof_dialog.setWindowTitle("Configurar DNS Spoofing por dominio")
+        self.dns_spoof_dialog.setMinimumSize(540, 440)
+        self.dns_spoof_dialog.setStyleSheet(
+            "QDialog { background: #0d0d0d; }"
+            "QLabel { color: #ff8800; }"
         )
-        dns_inner = QVBoxLayout(dns_group)
-        dns_inner.setSpacing(6)
+        dns_inner = QVBoxLayout(self.dns_spoof_dialog)
+        dns_inner.setSpacing(8)
 
         self.chk_dns_spoof = QCheckBox("Activar DNS Spoofing por dominios específicos")
-        self.chk_dns_spoof.setFont(QFont("Monospace", 9))
+        self.chk_dns_spoof.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
         self.chk_dns_spoof.setStyleSheet("color: #ff8800;")
         dns_inner.addWidget(self.chk_dns_spoof)
 
@@ -352,7 +357,7 @@ class WireTrap(QMainWindow):
             "Por cada dominio, indica la URL de login a clonar (opcional).\n"
             "Si dejas la URL vacía, muestra el captive portal genérico."
         )
-        dns_hint.setFont(QFont("Monospace", 8))
+        dns_hint.setFont(QFont("Monospace", 9))
         dns_hint.setStyleSheet("color: #888888;")
         dns_inner.addWidget(dns_hint)
 
@@ -363,7 +368,6 @@ class WireTrap(QMainWindow):
         self.dns_spoof_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.dns_spoof_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.dns_spoof_table.setFont(QFont("Monospace", 9))
-        self.dns_spoof_table.setFixedHeight(120)
         self.dns_spoof_table.setRowCount(3)
         self.dns_spoof_table.setStyleSheet(
             "QTableWidget { background: #0d0d0d; color: #ff8800; border: 1px solid #553300; }"
@@ -372,19 +376,19 @@ class WireTrap(QMainWindow):
         for row in range(3):
             self.dns_spoof_table.setItem(row, 0, QTableWidgetItem(""))
             self.dns_spoof_table.setItem(row, 1, QTableWidgetItem(""))
-        dns_inner.addWidget(self.dns_spoof_table)
+        dns_inner.addWidget(self.dns_spoof_table, 1)
 
         dns_btn_row = QHBoxLayout()
         btn_dns_add = QPushButton("+ Añadir fila")
-        btn_dns_add.setFont(QFont("Monospace", 8))
-        btn_dns_add.setFixedHeight(24)
+        btn_dns_add.setFont(QFont("Monospace", 9))
+        btn_dns_add.setFixedHeight(26)
         btn_dns_add.setStyleSheet(
             "QPushButton { background: #1a0a00; color: #ff8800; border: 1px solid #553300; }"
             "QPushButton:hover { background: #2a1400; }"
         )
         btn_dns_del = QPushButton("− Eliminar fila")
-        btn_dns_del.setFont(QFont("Monospace", 8))
-        btn_dns_del.setFixedHeight(24)
+        btn_dns_del.setFont(QFont("Monospace", 9))
+        btn_dns_del.setFixedHeight(26)
         btn_dns_del.setStyleSheet(
             "QPushButton { background: #1a0a00; color: #ff8800; border: 1px solid #553300; }"
             "QPushButton:hover { background: #2a1400; }"
@@ -395,11 +399,13 @@ class WireTrap(QMainWindow):
             self.dns_spoof_table.insertRow(r)
             self.dns_spoof_table.setItem(r, 0, QTableWidgetItem(""))
             self.dns_spoof_table.setItem(r, 1, QTableWidgetItem(""))
+            self._update_dns_spoof_status_label()
 
         def _dns_del_row():
             row = self.dns_spoof_table.currentRow()
             if row >= 0:
                 self.dns_spoof_table.removeRow(row)
+                self._update_dns_spoof_status_label()
 
         btn_dns_add.clicked.connect(_dns_add_row)
         btn_dns_del.clicked.connect(_dns_del_row)
@@ -437,9 +443,35 @@ class WireTrap(QMainWindow):
             btn_dns_del.setVisible(checked)
             dns_ip_lbl.setVisible(checked)
             self.dns_target_ip.setVisible(checked)
+            self._update_dns_spoof_status_label()
 
         self.chk_dns_spoof.toggled.connect(_on_dns_spoof_toggled)
-        opts_layout.addWidget(dns_group)
+
+        btn_dns_close = QPushButton("Cerrar")
+        btn_dns_close.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+        btn_dns_close.setStyleSheet(
+            "QPushButton { background: #1a0a00; color: #ff8800; border: 1px solid #553300; padding: 6px 16px; }"
+            "QPushButton:hover { background: #2a1400; }"
+        )
+        btn_dns_close.clicked.connect(self.dns_spoof_dialog.accept)
+        dns_inner.addWidget(btn_dns_close, alignment=Qt.AlignmentFlag.AlignRight)
+
+        # Lo unico visible en el panel principal: boton para abrir el dialogo
+        # + una etiqueta de estado (activado/desactivado y nº de dominios).
+        self.btn_dns_spoof_config = QPushButton("🌍 Configurar DNS Spoofing por dominio")
+        self.btn_dns_spoof_config.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+        self.btn_dns_spoof_config.setStyleSheet(
+            "QPushButton { background: #1a0a00; border: 1px solid #553300; color: #ff8800; padding: 6px; border-radius: 4px; }"
+            "QPushButton:hover { background: #2a1400; }"
+        )
+        self.btn_dns_spoof_config.clicked.connect(self.dns_spoof_dialog.exec)
+        opts_layout.addWidget(self.btn_dns_spoof_config)
+
+        self.dns_spoof_status_label = QLabel("DNS Spoofing: desactivado")
+        self.dns_spoof_status_label.setFont(QFont("Monospace", 8))
+        self.dns_spoof_status_label.setStyleSheet("color: #888888;")
+        self.dns_spoof_status_label.setWordWrap(True)
+        opts_layout.addWidget(self.dns_spoof_status_label)
 
         sep3 = QFrame()
         sep3.setFrameShape(QFrame.Shape.HLine)
@@ -669,6 +701,17 @@ class WireTrap(QMainWindow):
         self.cp_iface_combo.setEnabled(True)
         self.cp_out_iface_combo.setEnabled(True)
         self._cp_log("Portal detenido.")
+
+    def _update_dns_spoof_status_label(self):
+        if self.chk_dns_spoof.isChecked():
+            n = self.dns_spoof_table.rowCount()
+            self.dns_spoof_status_label.setText(
+                f"DNS Spoofing: activado ({n} fila{'s' if n != 1 else ''})"
+            )
+            self.dns_spoof_status_label.setStyleSheet("color: #00ff88;")
+        else:
+            self.dns_spoof_status_label.setText("DNS Spoofing: desactivado")
+            self.dns_spoof_status_label.setStyleSheet("color: #888888;")
 
     def _on_cp_browse_file_clicked(self):
         """Carga un .html propio del disco como plantilla de login, en vez
