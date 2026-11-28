@@ -104,20 +104,6 @@ WireTrap/
 └── test_templates/                # Test HTML templates for Captive Portal / DNS Spoofing
 ```
 
-## Status
-
-- [x] Passive scan with signal fix (`_get_signal`) and probe-request-based detection
-- [x] Rule-based decision engine (OPEN/WEP/WPA/WPA2/WPA3)
-- [x] Deauth + Evil Twin with real Internet (NAT/iptables)
-- [x] Beacon Flood via mdk4 (with optional WPA2 announcement)
-- [x] Full PMKID / Handshake / hashcat pipeline
-- [x] Captive Portal with Google or custom HTML template
-- [x] DNS Spoofing by domain (custom HTML template per domain, limited to plain HTTP)
-- [x] Live credential/cookie sniffer, with per-client dashboard (Evil Twin and Captive Portal)
-- [x] Post-login HTTPS interception via mitmproxy + custom CA (optional)
-- [ ] PDF report generator (`reporting/`)
-- [ ] CTS Flood / Downgrade Attack (recommended by the decision engine, not implemented)
-
 ## Usage
 
 ```bash
