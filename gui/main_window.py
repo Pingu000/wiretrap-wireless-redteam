@@ -340,7 +340,7 @@ class WireTrap(QMainWindow):
         # queda un boton para abrirlo + una etiqueta de estado.
         self.dns_spoof_dialog = QDialog(self)
         self.dns_spoof_dialog.setWindowTitle("Configurar DNS Spoofing por dominio")
-        self.dns_spoof_dialog.setMinimumSize(540, 620)
+        self.dns_spoof_dialog.setMinimumSize(780, 480)
         self.dns_spoof_dialog.setStyleSheet(
             "QDialog { background: #0d0d0d; }"
             "QLabel { color: #ff8800; }"
